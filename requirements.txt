@@ -1,0 +1,7 @@
+transformers>=4.30.0,<4.46.0
+datasets
+accelerate
+sentencepiece
+torch
+numpy
+safetensors
