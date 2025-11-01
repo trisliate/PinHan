@@ -4,7 +4,7 @@
 """
 import sys
 import unittest
-import json
+import orjson
 from pathlib import Path
 from datetime import datetime
 from io import StringIO
@@ -81,8 +81,8 @@ def main():
     
     # 保存报告
     report_file = Path(__file__).parent / 'test_report.json'
-    with open(report_file, 'w', encoding='utf-8') as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
+    with open(report_file, 'wb') as f:
+        f.write(orjson.dumps(report, option=orjson.OPT_INDENT_2))
     
     print(f"\n✅ 测试报告已保存到: {report_file}")
     

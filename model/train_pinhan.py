@@ -1,4 +1,7 @@
-"""训练脚本：拼音到汉字的 Transformer 模型训练."""
+"""
+训练脚本：拼音到汉字的 Transformer 模型训练 (改进版 v2.0).
+    python model/train_pinhan.py --data data/5k.jsonl --save-dir outputs/5k_model --epochs 40 --batch-size 32 --lr 1e-4
+"""
 import random
 import sys
 import logging
@@ -15,9 +18,30 @@ import torch.optim as optim
 sys.path.insert(0, str(Path(__file__).parent.parent / 'preprocess'))
 from seq2seq_transformer import Vocab, Seq2SeqTransformer, generate_square_subsequent_mask
 from pinyin_utils import normalize_pinyin_sequence, validate_pinyin_sequence
+from checkpoint_manager import TrainingCheckpointManager, resume_or_init, load_trained_model
 
 DATA_PATH = Path('data/clean_wiki.jsonl')
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# 🚀 智能设备选择
+def _get_device():
+    """
+    智能设备选择：
+    1. 尝试 NVIDIA CUDA
+    2. 否则使用 CPU（配置多线程）
+    """
+    # 优先级 1: NVIDIA CUDA
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        logging.info(f"✅ 使用 NVIDIA GPU: {torch.cuda.get_device_name(0)}")
+        return device
+    
+    # CPU 训练（配置多线程以充分利用 CPU）
+    num_cores = torch.get_num_threads()
+    logging.info(f"✅ 使用 CPU 训练 ({num_cores}核)")
+    torch.set_num_threads(num_cores)
+    return torch.device('cpu')
+
+DEVICE = _get_device()
 
 
 class PinyinHanziDataset(Dataset):
@@ -250,7 +274,16 @@ def save_checkpoint(
     src_vocab_size: int = None,
     tgt_vocab_size: int = None,
 ) -> None:
-    """保存 checkpoint (含词表大小用于验证)."""
+    """
+    旧版保存接口 (兼容性保留，不推荐使用).
+    推荐: 使用 TrainingCheckpointManager.save_checkpoint()
+    """
+    logger = logging.getLogger(__name__)
+    logger.warning(
+        "⚠️  使用 save_checkpoint() 已过时。\n"
+        "    推荐: 使用 TrainingCheckpointManager.save_checkpoint()\n"
+        "    新接口提供自动文件清理和最优模型追踪"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt = {
         'epoch': epoch,
@@ -396,38 +429,47 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=2
     )
+    
+    # 🔧 [修复 #1] 使用新的检查点管理系统
+    ckpt_mgr = TrainingCheckpointManager(save_dir, keep_checkpoints=3)
+    
+    # 保存训练配置（用于复现和调试）
+    training_config = {
+        'data_path': args.data,
+        'batch_size': args.batch_size,
+        'learning_rate': args.lr,
+        'epochs': args.epochs,
+        'model_config': {
+            'd_model': 256,
+            'nhead': 4,
+            'num_encoder_layers': 3,
+            'num_decoder_layers': 3,
+        },
+        'src_vocab_size': len(src_vocab),
+        'tgt_vocab_size': len(tgt_vocab),
+        'device': str(DEVICE),
+        'timestamp': datetime.now().isoformat(),
+    }
+    ckpt_mgr.save_training_config(training_config)
+    
     start_epoch = 1
     if args.resume:
-        ckpts = sorted(save_dir.glob('checkpoint_epoch*.pt'))
-        if ckpts:
-            latest = ckpts[-1]
-            logger.info(f"从 {latest} 恢复")
-            ck = torch.load(str(latest), map_location=DEVICE)
-            
-            # 🔴 新增: 词表一致性检查
-            old_src_size = ck.get('src_vocab_size', None)
-            old_tgt_size = ck.get('tgt_vocab_size', None)
-            
-            if old_src_size is not None and old_src_size != len(src_vocab):
-                logger.error(
-                    f"❌ 源词表大小不匹配: "
-                    f"checkpoint={old_src_size}, 当前={len(src_vocab)}"
-                )
-                logger.warning("提示: 如果是增量训练且有新词语是正常的")
-                logger.warning("如需强制继续，请重新运行不加--resume参数")
-                raise RuntimeError("词表不兼容")
-            
-            if old_tgt_size is not None and old_tgt_size != len(tgt_vocab):
-                logger.error(
-                    f"❌ 目标词表大小不匹配: "
-                    f"checkpoint={old_tgt_size}, 当前={len(tgt_vocab)}"
-                )
-                raise RuntimeError("词表不兼容")
-            
-            model.load_state_dict(ck['model_state_dict'])
-            optimizer.load_state_dict(ck['optimizer_state_dict'])
-            start_epoch = ck.get('epoch', 1) + 1
-            logger.info(f"✅ 从epoch {ck.get('epoch', '?')} 恢复，下一轮从 {start_epoch} 开始")
+        # 🔧 [修复 #2] 使用新的恢复接口（自动处理词表验证）
+        try:
+            start_epoch, ckpt_mgr = resume_or_init(
+                save_dir,
+                model,
+                optimizer,
+                src_vocab,
+                tgt_vocab,
+                device=DEVICE,
+                allow_vocab_increase=False,
+            )
+            logger.info(f"✅ 从检查点恢复成功\n{ckpt_mgr.get_status_summary()}")
+        except RuntimeError as e:
+            logger.error(f"❌ 恢复失败: {e}")
+            logger.warning("💡 建议: 删除旧检查点或不使用 --resume 参数重新开始")
+            raise
     logger.info(f"开始训练 {args.epochs} 轮...")
     train_start_time = time.time()
     
@@ -445,8 +487,47 @@ def main() -> None:
         new_lr = optimizer.param_groups[0]['lr']
         lr_change = " (↓ LR)" if new_lr < old_lr else ""
         
-        # 保存checkpoint
-        save_checkpoint(model, optimizer, ep, save_dir, len(src_vocab), len(tgt_vocab))
+        # 🔧 [修复 #1] 保存检查点到新系统，自动清理旧文件
+        ckpt_mgr.save_checkpoint(
+            epoch=ep,
+            model=model,
+            optimizer=optimizer,
+            loss=avg_loss,
+            src_vocab=src_vocab,
+            tgt_vocab=tgt_vocab,
+            metrics={
+                'grad_norm': avg_grad_norm,
+                'learning_rate': new_lr,
+                'epoch_time': epoch_time,
+            }
+        )
+        
+        # 🔧 [修复 #1] 自动保存最优模型
+        ckpt_mgr.save_best_model(
+            epoch=ep,
+            model=model,
+            optimizer=optimizer,
+            loss=avg_loss,
+            src_vocab=src_vocab,
+            tgt_vocab=tgt_vocab,
+            metrics={
+                'grad_norm': avg_grad_norm,
+                'learning_rate': new_lr,
+            }
+        )
+        
+        # 🔧 [修复 #3] 记录训练历史
+        ckpt_mgr.update_training_history(
+            epoch=ep,
+            loss=avg_loss,
+            metrics={
+                'grad_norm': avg_grad_norm,
+                'learning_rate': new_lr,
+                'epoch_time': epoch_time,
+            }
+        )
+        
+        # 保存词表（兼容旧代码）
         src_vocab.save(str(save_dir / 'src_vocab.json'))
         tgt_vocab.save(str(save_dir / 'tgt_vocab.json'))
         
@@ -466,10 +547,22 @@ def main() -> None:
             f"ETA: {eta_seconds:.0f}s | "
             f"Mem: {get_memory_usage():.2f}GB"
         )
+        
+        # 显示最优模型状态
+        if ckpt_mgr.best_loss != float('inf'):
+            logger.info(
+                f"最优: Loss={ckpt_mgr.best_loss:.4f} @ Epoch {ckpt_mgr.best_epoch} | "
+                f"恶化: {avg_loss - ckpt_mgr.best_loss:+.4f}"
+            )
         logger.info("-" * 70)
     
     total_train_time = time.time() - train_start_time
     logger.info(f"\n✅ 训练完成! 总耗时: {total_train_time:.1f}s")
+    
+    # 🔧 [修复 #3] 保存训练摘要
+    ckpt_mgr.save_training_summary()
+    logger.info(f"\n📊 训练总结:")
+    logger.info(ckpt_mgr.get_status_summary())
     
     # 保存最终模型及完整元数据
     final_model_data = {
@@ -485,6 +578,8 @@ def main() -> None:
         'metadata': {
             'epoch': args.epochs,
             'loss': avg_loss,
+            'best_loss': ckpt_mgr.best_loss,
+            'best_epoch': ckpt_mgr.best_epoch,
             'timestamp': datetime.now().isoformat(),
             'device': str(DEVICE),
             'total_time': total_train_time,
@@ -497,6 +592,13 @@ def main() -> None:
     }
     torch.save(final_model_data, save_dir / 'model.pt')
     logger.info(f"📦 模型已保存到 {save_dir}/model.pt (含元数据)")
+    
+    logger.info(f"\n📁 输出文件:")
+    logger.info(f"   ✅ 最优模型: {save_dir}/best_model.pt")
+    logger.info(f"   ✅ 最新检查点: {save_dir}/checkpoint_epoch{args.epochs}.pt")
+    logger.info(f"   ✅ 训练日志: {ckpt_mgr.log_dir}/")
+    logger.info(f"   ✅ 配置文件: {ckpt_mgr.log_dir}/config.json")
+    logger.info(f"   ✅ 摘要: {ckpt_mgr.log_dir}/training_summary.json")
 
 
 if __name__ == '__main__':

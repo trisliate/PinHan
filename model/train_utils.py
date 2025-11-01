@@ -14,7 +14,6 @@ from pathlib import Path
 from datetime import datetime
 from typing import Tuple, Dict, Any
 import argparse
-import json
 import orjson
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -25,7 +24,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'preprocess'))
 from seq2seq_transformer import Vocab, Seq2SeqTransformer, generate_square_subsequent_mask
 from pinyin_utils import normalize_pinyin_sequence, validate_pinyin_sequence
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+def get_device():
+    """智能设备选择：优先 NVIDIA CUDA，否则 CPU"""
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        device_name = torch.cuda.get_device_name(0)
+        memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        logging.info(f"✅ 使用 NVIDIA GPU: {device_name} ({memory_gb:.2f}GB)")
+        return device
+    
+    # CPU 训练
+    num_cores = torch.get_num_threads()
+    logging.info(f"✅ 使用 CPU 训练 ({num_cores}核)")
+    torch.set_num_threads(num_cores)
+    return torch.device('cpu')
+
+DEVICE = get_device()
 
 
 def get_model_version() -> str:
@@ -94,7 +109,7 @@ def hash_vocab(vocab: Vocab) -> str:
     """计算词表的哈希值，用于版本比对."""
     import hashlib
     tokens = sorted(vocab.token_to_id.keys())
-    content = json.dumps(tokens)
+    content = orjson.dumps(tokens).decode('utf-8')
     return hashlib.md5(content.encode()).hexdigest()
 
 
@@ -208,8 +223,8 @@ def save_model_complete(
     torch.save(final_model, out_dir / 'model.pt')
     
     # 保存元数据为JSON (便于查看)
-    with open(out_dir / 'metadata.json', 'w', encoding='utf-8') as f:
-        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    with open(out_dir / 'metadata.json', 'wb') as f:
+        f.write(orjson.dumps(metadata, option=orjson.OPT_INDENT_2))
     
     # 保存词表
     src_vocab.save(str(out_dir / 'src_vocab.json'))
@@ -267,8 +282,8 @@ def compare_models(model_dir1: Path, model_dir2: Path) -> None:
     logger = logging.getLogger()
     
     def load_meta(path):
-        with open(path / 'metadata.json', 'r') as f:
-            return json.load(f)
+        with open(path / 'metadata.json', 'rb') as f:
+            return orjson.loads(f.read())
     
     meta1 = load_meta(model_dir1)
     meta2 = load_meta(model_dir2)
