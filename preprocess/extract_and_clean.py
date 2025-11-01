@@ -14,7 +14,7 @@ r"""
 安装：pip install pypinyin opencc-python-reimplemented orjson bitarray mmh3
 
 使用示例：
-    python preprocess/extract_and_clean.py --input wiki.xml --output data/clean.jsonl
+    python preprocess/extract_and_clean.py --input wiki.xml --output data/clean.jsonl --buffer-size 50000
 """
 import argparse
 import os

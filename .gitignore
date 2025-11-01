@@ -38,7 +38,8 @@ data/
 *.csv
 
 # Large dataset (Wiki dump)
-2025-10-zhwiki-latest-pages-articles.xml
+zhwiki-latest-pages-articles.xml
+*.md
 
 # OS files
 .DS_Store
