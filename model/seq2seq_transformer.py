@@ -150,7 +150,7 @@ class Seq2SeqTransformer(nn.Module):
             num_decoder_layers=num_decoder_layers,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
-            batch_first=False,
+            batch_first=False,  # 保持False, 因为我们手动处理序列维度
         )
         self.generator = nn.Linear(d_model, tgt_vocab_size)
         self._init_weights()

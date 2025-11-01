@@ -2,6 +2,7 @@
 import random
 import sys
 import logging
+import time
 from pathlib import Path
 from datetime import datetime
 import argparse
@@ -175,12 +176,18 @@ def train_one_epoch(
     src_vocab: Vocab,
     tgt_vocab: Vocab,
     device: torch.device,
-) -> float:
-    """训练一个 epoch."""
+    epoch: int,
+) -> tuple[float, float]:
+    """训练一个 epoch, 返回 (avg_loss, avg_grad_norm)."""
     logger = logging.getLogger()
     model.train()
     total_loss = 0.0
+    total_grad_norm = 0.0
+    epoch_start = time.time()
+    num_batches = len(dataloader)
+    
     for i, (src, tgt) in enumerate(dataloader):
+        batch_start = time.time()
         src = src.to(device)
         tgt = tgt.to(device)
         tgt_input = tgt[:-1, :]
@@ -188,6 +195,11 @@ def train_one_epoch(
         tgt_mask = generate_square_subsequent_mask(tgt_input.size(0)).to(device)
         src_key_padding_mask = (src.transpose(0, 1) == src_vocab.token_to_id[src_vocab.pad_token])
         tgt_key_padding_mask = (tgt_input.transpose(0, 1) == tgt_vocab.token_to_id[tgt_vocab.pad_token])
+        
+        # 🔧 转换mask类型为float, 保证一致性
+        tgt_mask = tgt_mask.float()
+        src_key_padding_mask = src_key_padding_mask.float()
+        tgt_key_padding_mask = tgt_key_padding_mask.float()
         optimizer.zero_grad()
         logits = model(
             src,
@@ -199,23 +211,103 @@ def train_one_epoch(
         )
         loss = criterion(logits.view(-1, logits.size(-1)), tgt_out.reshape(-1))
         loss.backward()
+        
+        # 监控梯度
+        grad_norm = log_gradient_stats(model, logger)
+        total_grad_norm += grad_norm
+        
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         total_loss += loss.item()
-        if i % 50 == 0:
-            logger.info(f"Step {i}, loss: {loss.item():.4f}")
-    return total_loss / len(dataloader)
+        
+        # 定期输出进度
+        if i % max(1, num_batches // 10) == 0:
+            batch_time = time.time() - batch_start
+            progress = (i + 1) / num_batches
+            elapsed = time.time() - epoch_start
+            eta = elapsed / (i + 1) * (num_batches - i - 1) if i > 0 else 0
+            
+            logger.info(
+                f"Epoch {epoch} [{i+1:>4d}/{num_batches}] "
+                f"loss={loss.item():.4f} "
+                f"grad_norm={grad_norm:.4f} "
+                f"time={batch_time:.2f}s "
+                f"ETA={eta:.0f}s"
+            )
+    
+    epoch_time = time.time() - epoch_start
+    avg_loss = total_loss / len(dataloader)
+    avg_grad_norm = total_grad_norm / len(dataloader)
+    
+    return avg_loss, avg_grad_norm, epoch_time
 
 
-def save_checkpoint(model: nn.Module, optimizer: optim.Optimizer, epoch: int, out_dir: Path) -> None:
-    """保存 checkpoint."""
+def save_checkpoint(
+    model: nn.Module,
+    optimizer: optim.Optimizer,
+    epoch: int,
+    out_dir: Path,
+    src_vocab_size: int = None,
+    tgt_vocab_size: int = None,
+) -> None:
+    """保存 checkpoint (含词表大小用于验证)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
+        'src_vocab_size': src_vocab_size,
+        'tgt_vocab_size': tgt_vocab_size,
     }
     torch.save(ckpt, out_dir / f'checkpoint_epoch{epoch}.pt')
+
+
+def log_gradient_stats(model: nn.Module, logger: logging.Logger) -> float:
+    """计算并记录梯度统计."""
+    total_norm = 0.0
+    for param in model.parameters():
+        if param.grad is not None:
+            total_norm += param.grad.norm().item() ** 2
+    total_norm = (total_norm) ** 0.5
+    
+    if total_norm > 100:
+        logger.warning(f"⚠️  梯度范数过大: {total_norm:.4f} (可能爆炸)")
+    elif total_norm < 1e-8:
+        logger.warning(f"⚠️  梯度范数过小: {total_norm:.4e} (可能消失)")
+    
+    return total_norm
+
+
+def get_memory_usage() -> float:
+    """获取当前GPU/CPU内存使用 (GB)."""
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / 1024 ** 3
+    return 0.0
+
+
+def log_training_start(
+    logger: logging.Logger,
+    model: nn.Module,
+    data_size: int,
+    batch_size: int,
+    epochs: int,
+    lr: float,
+    device: torch.device,
+) -> None:
+    """记录训练开始时的详细信息."""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    logger.info("="*70)
+    logger.info("🚀 训练配置")
+    logger.info("="*70)
+    logger.info(f"设备: {device}")
+    logger.info(f"模型参数: {total_params:,} (可训练: {trainable_params:,})")
+    logger.info(f"数据集大小: {data_size:,}")
+    logger.info(f"批大小: {batch_size}, 总批数: {(data_size + batch_size - 1) // batch_size}")
+    logger.info(f"轮数: {epochs}, 学习率: {lr:.6f}")
+    logger.info(f"初始内存: {get_memory_usage():.2f} GB")
+    logger.info("="*70)
 
 
 def setup_logging(log_file: str | None = None) -> logging.Logger:
@@ -288,10 +380,21 @@ def main() -> None:
         pad_idx_tgt=tgt_vocab.token_to_id[tgt_vocab.pad_token],
     )
     model = model.to(DEVICE)
+    
+    # 🔴 新增: 记录训练开始详情
+    log_training_start(
+        logger,
+        model,
+        len(ds),
+        args.batch_size,
+        args.epochs,
+        args.lr,
+        DEVICE,
+    )
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.CrossEntropyLoss(ignore_index=tgt_vocab.token_to_id[tgt_vocab.pad_token])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=2, verbose=True
+        optimizer, mode='min', factor=0.5, patience=2
     )
     start_epoch = 1
     if args.resume:
@@ -300,19 +403,100 @@ def main() -> None:
             latest = ckpts[-1]
             logger.info(f"从 {latest} 恢复")
             ck = torch.load(str(latest), map_location=DEVICE)
+            
+            # 🔴 新增: 词表一致性检查
+            old_src_size = ck.get('src_vocab_size', None)
+            old_tgt_size = ck.get('tgt_vocab_size', None)
+            
+            if old_src_size is not None and old_src_size != len(src_vocab):
+                logger.error(
+                    f"❌ 源词表大小不匹配: "
+                    f"checkpoint={old_src_size}, 当前={len(src_vocab)}"
+                )
+                logger.warning("提示: 如果是增量训练且有新词语是正常的")
+                logger.warning("如需强制继续，请重新运行不加--resume参数")
+                raise RuntimeError("词表不兼容")
+            
+            if old_tgt_size is not None and old_tgt_size != len(tgt_vocab):
+                logger.error(
+                    f"❌ 目标词表大小不匹配: "
+                    f"checkpoint={old_tgt_size}, 当前={len(tgt_vocab)}"
+                )
+                raise RuntimeError("词表不兼容")
+            
             model.load_state_dict(ck['model_state_dict'])
             optimizer.load_state_dict(ck['optimizer_state_dict'])
             start_epoch = ck.get('epoch', 1) + 1
+            logger.info(f"✅ 从epoch {ck.get('epoch', '?')} 恢复，下一轮从 {start_epoch} 开始")
     logger.info(f"开始训练 {args.epochs} 轮...")
+    train_start_time = time.time()
+    
     for ep in range(start_epoch, args.epochs + 1):
-        avg_loss = train_one_epoch(model, dataloader, optimizer, criterion, src_vocab, tgt_vocab, DEVICE)
-        logger.info(f"Epoch {ep}: 平均 loss {avg_loss:.4f}")
+        avg_loss, avg_grad_norm, epoch_time = train_one_epoch(
+            model, dataloader, optimizer, criterion, src_vocab, tgt_vocab, DEVICE, ep
+        )
+        
+        # 记录当前学习率
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # 调整学习率
+        old_lr = current_lr
         scheduler.step(avg_loss)
-        save_checkpoint(model, optimizer, ep, save_dir)
+        new_lr = optimizer.param_groups[0]['lr']
+        lr_change = " (↓ LR)" if new_lr < old_lr else ""
+        
+        # 保存checkpoint
+        save_checkpoint(model, optimizer, ep, save_dir, len(src_vocab), len(tgt_vocab))
         src_vocab.save(str(save_dir / 'src_vocab.json'))
         tgt_vocab.save(str(save_dir / 'tgt_vocab.json'))
-    torch.save({'model_state_dict': model.state_dict()}, save_dir / 'model.pt')
-    logger.info(f"训练完成，模型保存到 {save_dir}")
+        
+        # 计算总进度
+        total_time = time.time() - train_start_time
+        avg_time_per_epoch = total_time / (ep - start_epoch + 1)
+        remaining_epochs = args.epochs - ep
+        eta_seconds = avg_time_per_epoch * remaining_epochs
+        
+        logger.info("-" * 70)
+        logger.info(
+            f"Epoch {ep:3d}/{args.epochs} | "
+            f"Loss: {avg_loss:.4f} | "
+            f"Grad: {avg_grad_norm:.4f} | "
+            f"LR: {new_lr:.6f}{lr_change} | "
+            f"Time: {epoch_time:.1f}s | "
+            f"ETA: {eta_seconds:.0f}s | "
+            f"Mem: {get_memory_usage():.2f}GB"
+        )
+        logger.info("-" * 70)
+    
+    total_train_time = time.time() - train_start_time
+    logger.info(f"\n✅ 训练完成! 总耗时: {total_train_time:.1f}s")
+    
+    # 保存最终模型及完整元数据
+    final_model_data = {
+        'model_state_dict': model.state_dict(),
+        'config': {
+            'd_model': 256,
+            'nhead': 4,
+            'num_encoder_layers': 3,
+            'num_decoder_layers': 3,
+            'src_vocab_size': len(src_vocab),
+            'tgt_vocab_size': len(tgt_vocab),
+        },
+        'metadata': {
+            'epoch': args.epochs,
+            'loss': avg_loss,
+            'timestamp': datetime.now().isoformat(),
+            'device': str(DEVICE),
+            'total_time': total_train_time,
+            'data_source': args.data,
+        },
+        'vocab_info': {
+            'src_vocab_size': len(src_vocab),
+            'tgt_vocab_size': len(tgt_vocab),
+        }
+    }
+    torch.save(final_model_data, save_dir / 'model.pt')
+    logger.info(f"📦 模型已保存到 {save_dir}/model.pt (含元数据)")
 
 
 if __name__ == '__main__':
