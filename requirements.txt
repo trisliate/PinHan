@@ -6,3 +6,7 @@ torch
 numpy
 safetensors
 orjson
+pypinyin
+opencc-python-reimplemented
+bitarray
+mmh3
