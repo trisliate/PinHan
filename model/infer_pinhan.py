@@ -2,14 +2,65 @@
 import sys
 import time
 import argparse
+import re
 from pathlib import Path
 import orjson
 import torch
 import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / 'preprocess'))
 from seq2seq_transformer import Seq2SeqTransformer, Vocab, generate_square_subsequent_mask
+from pinyin_utils import normalize_pinyin_sequence, normalize_light_tone
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def clean_pinyin_input(pinyin_str: str) -> tuple:
+    """
+    清理和规范化用户输入的拼音字符串，同时保留标点符号位置。
+    
+    Args:
+        pinyin_str: 用户输入的拼音字符串
+    
+    Returns:
+        (清理后的拼音字符串, 标点符号列表)
+        
+    例：
+        输入：  "ni3 hao3, wo3 jiao4 li3 hua2!"
+        输出：  ("ni3 hao3 wo3 jiao4 li3 hua2", [(",", 2), ("!", 6)])
+    """
+    # 提取标点符号及其位置（以拼音单词为单位）
+    punctuation_pattern = r'[，。！？；：""''（）【】…、,.\!?;:\"\'\[\]\(\)\-/]'
+    
+    # 分割拼音和标点
+    tokens = re.split(r'[\s]+', pinyin_str.strip())
+    pinyins = []
+    punctuations = []  # (punctuation, position)
+    
+    for token in tokens:
+        if not token:
+            continue
+        
+        # 从token中提取标点和拼音
+        text = ''
+        punct = ''
+        for char in token:
+            if re.match(punctuation_pattern, char):
+                punct += char
+            else:
+                text += char
+        
+        if text:
+            # 规范化拼音
+            normalized = normalize_pinyin_sequence(text)
+            normalized = normalize_light_tone(normalized)
+            pinyins.append(normalized)
+            
+            if punct:
+                # 记录标点位置（在拼音列表中的索引）
+                punctuations.append((punct, len(pinyins) - 1))
+    
+    return ' '.join(pinyins), punctuations
 
 
 def load_model(
@@ -172,9 +223,28 @@ def main() -> None:
     print("✅ 模型加载成功\n")
     
     # 推理
-    print(f"输入拼音: {args.pinyin}")
-    src_tokens = args.pinyin.strip().split()
+    print(f"输入拼音（原始）: {args.pinyin}")
+    
+    # 清理和规范化用户输入
+    cleaned_pinyin, punctuations = clean_pinyin_input(args.pinyin)
+    print(f"输入拼音（清理后）: {cleaned_pinyin}")
+    
+    src_tokens = cleaned_pinyin.strip().split()
+    
+    # 验证是否为空
+    if not src_tokens or all(not t for t in src_tokens):
+        print("错误：清理后的拼音为空，请检查输入")
+        return
+    
     src_ids = src_vocab.encode(src_tokens, add_bos_eos=True)
+    
+    # 检查是否有未知词
+    unk_count = sum(1 for s_id in src_ids if s_id == src_vocab.token_to_id[src_vocab.unk_token])
+    if unk_count > 0:
+        print(f"警告：发现 {unk_count} 个未知词（<unk>），可能不在词表中")
+        print(f"   建议：这些拼音在训练数据中未出现过")
+    
+    print()  # 空行
     
     if args.beam_size == 1:
         # 贪心解码
@@ -184,6 +254,16 @@ def main() -> None:
         elapsed = time.time() - start_time
         pred_tokens = tgt_vocab.decode(pred_ids)
         pred_text = ''.join(pred_tokens)
+        
+        # 恢复标点符号
+        pred_text_with_punct = list(pred_text)
+        offset = 0
+        for punct, pos in punctuations:
+            insert_pos = min(pos + 1 + offset, len(pred_text_with_punct))
+            pred_text_with_punct.insert(insert_pos, punct)
+            offset += 1
+        pred_text = ''.join(pred_text_with_punct)
+        
         print(f"预测汉字: {pred_text}")
         print(f"推理耗时: {elapsed * 1000:.2f}ms\n")
     else:
@@ -193,10 +273,20 @@ def main() -> None:
         candidates = beam_search_decode(model, src_ids, src_vocab, tgt_vocab, beam_size=args.beam_size, device=device)
         elapsed = time.time() - start_time
         
-        print("候选列表（排序by分数）:")
+        print("候选列表（排序by分数):")
         for rank, (pred_ids, score) in enumerate(candidates, 1):
             pred_tokens = tgt_vocab.decode(pred_ids)
             pred_text = ''.join(pred_tokens)
+            
+            # 恢复标点符号
+            pred_text_with_punct = list(pred_text)
+            offset = 0
+            for punct, pos in punctuations:
+                insert_pos = min(pos + 1 + offset, len(pred_text_with_punct))
+                pred_text_with_punct.insert(insert_pos, punct)
+                offset += 1
+            pred_text = ''.join(pred_text_with_punct)
+            
             print(f"  {rank}. {pred_text} (分数: {score:.4f})")
         print(f"推理耗时: {elapsed * 1000:.2f}ms\n")
 

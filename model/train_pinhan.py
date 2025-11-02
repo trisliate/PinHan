@@ -220,10 +220,14 @@ def train_one_epoch(
         src_key_padding_mask = (src.transpose(0, 1) == src_vocab.token_to_id[src_vocab.pad_token])
         tgt_key_padding_mask = (tgt_input.transpose(0, 1) == tgt_vocab.token_to_id[tgt_vocab.pad_token])
         
-        # 🔧 转换mask类型为float, 保证一致性
-        tgt_mask = tgt_mask.float()
+        # 统一 mask 类型为 float
+        # - tgt_mask: 因果掩码，类型为 float（-inf 和 0.0）
+        # - src_key_padding_mask: bool → float
+        # - tgt_key_padding_mask: bool → float
+        # PyTorch Transformer 要求所有 mask 类型一致
         src_key_padding_mask = src_key_padding_mask.float()
         tgt_key_padding_mask = tgt_key_padding_mask.float()
+        
         optimizer.zero_grad()
         logits = model(
             src,
@@ -390,17 +394,58 @@ def main() -> None:
         normalize_pinyin=args.normalize_pinyin,
     )
     ds.print_statistics()
+    
+    # 🔴 新增: 验证集分割（90% 训练，10% 验证）
+    # 注意: 验证集用于监控泛化能力，但当前版本中仅用于显示
+    # 完整的 Early Stopping 功能需要在后续版本中实现
+    total_samples = len(ds)
+    val_split = 0.1  # 10% 用于验证
+    val_size = max(1, int(total_samples * val_split))
+    train_size = total_samples - val_size
+    
+    # 固定随机种子以保证可复现性
+    random_state = random.Random(42)
+    indices = list(range(total_samples))
+    random_state.shuffle(indices)
+    train_indices = indices[:train_size]
+    val_indices = indices[train_size:]
+    
+    # 创建训练和验证子集
+    train_samples = [ds.samples[i] for i in train_indices]
+    val_samples = [ds.samples[i] for i in val_indices]
+    
+    # 创建新的数据集对象用于验证
+    val_ds = PinyinHanziDataset(Path(args.data), src_vocab, tgt_vocab, max_src_len=64, max_tgt_len=64, normalize_pinyin=args.normalize_pinyin)
+    val_ds.samples = val_samples
+    
+    # 创建训练数据集（仅包含训练样本）
+    train_ds = PinyinHanziDataset(Path(args.data), src_vocab, tgt_vocab, max_src_len=64, max_tgt_len=64, normalize_pinyin=args.normalize_pinyin)
+    train_ds.samples = train_samples
+    
+    logger.info(f"✅ 数据集分割: 训练 {train_size} 样本, 验证 {val_size} 样本")
+    
     assert src_vocab.pad_token == tgt_vocab.pad_token, "src 和 tgt 的 pad_token 必须相同"
-    if args.max_samples > 0 and len(ds) > args.max_samples:
-        indices = random.sample(range(len(ds)), args.max_samples)
-        ds.samples = [ds.samples[i] for i in indices]
-        logger.info(f"使用 {len(ds)} 个样本")
-    dataloader = DataLoader(
-        ds,
+    if args.max_samples > 0 and len(train_ds) > args.max_samples:
+        indices = random.sample(range(len(train_ds)), args.max_samples)
+        train_ds.samples = [train_ds.samples[i] for i in indices]
+        logger.info(f"使用 {len(train_ds)} 个训练样本")
+    
+    # 分别创建训练和验证数据加载器
+    train_dataloader = DataLoader(
+        train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=lambda b: collate_fn(b, src_vocab, tgt_vocab),
     )
+    
+    val_dataloader = DataLoader(
+        val_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=lambda b: collate_fn(b, src_vocab, tgt_vocab),
+    )
+    
+    logger.info(f"训练批数: {len(train_dataloader)}, 验证批数: {len(val_dataloader)}")
     save_dir = Path(args.save_dir)
     model = Seq2SeqTransformer(
         len(src_vocab),
@@ -418,7 +463,7 @@ def main() -> None:
     log_training_start(
         logger,
         model,
-        len(ds),
+        len(train_ds),
         args.batch_size,
         args.epochs,
         args.lr,
@@ -475,15 +520,45 @@ def main() -> None:
     
     for ep in range(start_epoch, args.epochs + 1):
         avg_loss, avg_grad_norm, epoch_time = train_one_epoch(
-            model, dataloader, optimizer, criterion, src_vocab, tgt_vocab, DEVICE, ep
+            model, train_dataloader, optimizer, criterion, src_vocab, tgt_vocab, DEVICE, ep
         )
+        
+        # 🔴 新增: 验证阶段（计算验证集损失，用于 Early Stopping）
+        model.eval()
+        val_loss = 0.0
+        val_batches = 0
+        with torch.no_grad():
+            for src, tgt in val_dataloader:
+                src = src.to(DEVICE)
+                tgt = tgt.to(DEVICE)
+                tgt_input = tgt[:-1, :]
+                tgt_out = tgt[1:, :]
+                tgt_mask = generate_square_subsequent_mask(tgt_input.size(0)).to(DEVICE)
+                src_key_padding_mask = (src.transpose(0, 1) == src_vocab.token_to_id[src_vocab.pad_token])
+                tgt_key_padding_mask = (tgt_input.transpose(0, 1) == tgt_vocab.token_to_id[tgt_vocab.pad_token])
+                src_key_padding_mask = src_key_padding_mask.float()
+                tgt_key_padding_mask = tgt_key_padding_mask.float()
+                
+                logits = model(
+                    src, tgt_input,
+                    tgt_mask=tgt_mask,
+                    src_key_padding_mask=src_key_padding_mask,
+                    tgt_key_padding_mask=tgt_key_padding_mask,
+                    memory_key_padding_mask=src_key_padding_mask,
+                )
+                loss = criterion(logits.view(-1, logits.size(-1)), tgt_out.reshape(-1))
+                val_loss += loss.item()
+                val_batches += 1
+        
+        val_loss = val_loss / max(1, val_batches) if val_batches > 0 else 0.0
+        model.train()
         
         # 记录当前学习率
         current_lr = optimizer.param_groups[0]['lr']
         
         # 调整学习率
         old_lr = current_lr
-        scheduler.step(avg_loss)
+        scheduler.step(val_loss)  # 使用验证集损失来调整学习率
         new_lr = optimizer.param_groups[0]['lr']
         lr_change = " (↓ LR)" if new_lr < old_lr else ""
         
@@ -499,6 +574,7 @@ def main() -> None:
                 'grad_norm': avg_grad_norm,
                 'learning_rate': new_lr,
                 'epoch_time': epoch_time,
+                'val_loss': val_loss,  # 添加验证损失
             }
         )
         
@@ -524,6 +600,7 @@ def main() -> None:
                 'grad_norm': avg_grad_norm,
                 'learning_rate': new_lr,
                 'epoch_time': epoch_time,
+                'val_loss': val_loss,  # 添加验证损失
             }
         )
         
@@ -540,7 +617,7 @@ def main() -> None:
         logger.info("-" * 70)
         logger.info(
             f"Epoch {ep:3d}/{args.epochs} | "
-            f"Loss: {avg_loss:.4f} | "
+            f"Train Loss: {avg_loss:.4f} | Val Loss: {val_loss:.4f} | "
             f"Grad: {avg_grad_norm:.4f} | "
             f"LR: {new_lr:.6f}{lr_change} | "
             f"Time: {epoch_time:.1f}s | "

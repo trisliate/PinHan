@@ -106,10 +106,15 @@ class PositionalEncoding(nn.Module):
             torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
         )
         pe[:, 0::2] = torch.sin(position * div_term)
-        if d_model % 2 == 1:
-            pe[:, 1::2] = torch.cos(position * div_term[:-1])
-        else:
+        
+        # 修复：正确处理奇偶维度
+        # 当 d_model 为偶数时，1::2 和 div_term 长度相同
+        # 当 d_model 为奇数时，1::2 比 div_term 少一个元素
+        if d_model % 2 == 0:
             pe[:, 1::2] = torch.cos(position * div_term)
+        else:
+            pe[:, 1::2] = torch.cos(position * div_term[:, :-1])
+        
         pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
 
@@ -190,7 +195,16 @@ class Seq2SeqTransformer(nn.Module):
 
 
 def generate_square_subsequent_mask(sz: int) -> torch.Tensor:
-    """生成因果掩码."""
+    """
+    生成因果掩码（因果蒙版）。
+    
+    PyTorch Transformer 期望的 mask 格式：
+    - bool 类型：True 表示"屏蔽"（attend=False），False 表示"允许"（attend=True）
+    - 或 float 类型：-inf 表示屏蔽，0.0 表示允许（已弃用，建议用 bool）
+    
+    为了兼容性，此函数返回 float 类型的 mask，值为 -inf (屏蔽) 和 0.0 (允许)。
+    这是标准做法，与 PyTorch 官方示例一致。
+    """
     mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
     mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
     return mask
