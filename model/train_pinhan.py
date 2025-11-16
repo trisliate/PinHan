@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'preprocess'))
 from seq2seq_transformer import Vocab, Seq2SeqTransformer, generate_square_subsequent_mask
 from pinyin_utils import normalize_pinyin_sequence, validate_pinyin_sequence
 from checkpoint_manager import TrainingCheckpointManager, resume_or_init, load_trained_model
+from git_utils import check_uncommitted_changes, save_git_info_to_checkpoint
 
 DATA_PATH = Path('data/clean_wiki.jsonl')
 
@@ -373,11 +374,26 @@ def main() -> None:
     parser.add_argument('--resume', action='store_true', help='从 checkpoint 恢复')
     parser.add_argument('--log-file', type=str, default=None, help='日志文件路径')
     parser.add_argument('--normalize-pinyin', action='store_true', help='规范化拼音')
+    parser.add_argument('--force', action='store_true', help='忽略未提交的更改警告并继续训练')
     args = parser.parse_args()
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     default_log = f'outputs/train_{timestamp}.log'
     log_file = args.log_file or default_log
     logger = setup_logging(log_file)
+    
+    # 🔒 检查未提交的更改
+    logger.info("="*70)
+    logger.info("检查代码状态...")
+    should_proceed, msg = check_uncommitted_changes(
+        repo_path=Path(__file__).parent.parent,
+        force=args.force,
+        logger=logger
+    )
+    if not should_proceed:
+        logger.error("训练已中止。请提交更改或使用 --force 标志继续。")
+        return
+    logger.info("="*70)
+    
     logger.info("开始训练...")
     logger.info(f"数据路径: {args.data}")
     logger.info(f"批大小: {args.batch_size}, 学习率: {args.lr}, 轮数: {args.epochs}")

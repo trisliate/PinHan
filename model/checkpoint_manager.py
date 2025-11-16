@@ -9,6 +9,13 @@ from typing import Dict, Any, Optional, Tuple
 import torch
 import torch.nn as nn
 
+try:
+    from git_utils import save_git_info_to_checkpoint
+except ImportError:
+    # Fallback if git_utils is not available
+    def save_git_info_to_checkpoint(checkpoint: dict, repo_path: Optional[Path] = None):
+        pass
+
 
 class TrainingCheckpointManager:
     """
@@ -86,6 +93,9 @@ class TrainingCheckpointManager:
             'metrics': metrics or {},
         }
         
+        # 添加 Git 信息以便于复现
+        save_git_info_to_checkpoint(checkpoint, self.save_dir.parent)
+        
         ckpt_path = self.save_dir / f'checkpoint_epoch{epoch}.pt'
         torch.save(checkpoint, ckpt_path)
         self.logger.debug(f"✅ 保存检查点: {ckpt_path.name}")
@@ -137,6 +147,9 @@ class TrainingCheckpointManager:
                 'best_flag': True,
                 'metrics': metrics or {},
             }
+            
+            # 添加 Git 信息以便于复现
+            save_git_info_to_checkpoint(best_model, self.save_dir.parent)
             
             best_path = self.save_dir / 'best_model.pt'
             torch.save(best_model, best_path)
