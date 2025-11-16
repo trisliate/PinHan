@@ -113,7 +113,7 @@ class PositionalEncoding(nn.Module):
         if d_model % 2 == 0:
             pe[:, 1::2] = torch.cos(position * div_term)
         else:
-            pe[:, 1::2] = torch.cos(position * div_term[:, :-1])
+            pe[:, 1::2] = torch.cos(position * div_term[:-1])
         
         pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)

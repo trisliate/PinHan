@@ -30,7 +30,7 @@ def clean_pinyin_input(pinyin_str: str) -> tuple:
         输出：  ("ni3 hao3 wo3 jiao4 li3 hua2", [(",", 2), ("!", 6)])
     """
     # 提取标点符号及其位置（以拼音单词为单位）
-    punctuation_pattern = r'[，。！？；：""''（）【】…、,.\!?;:\"\'\[\]\(\)\-/]'
+    punctuation_pattern = r'''[，。！？；：""''（）【】…、,.!?;:"'\[\]\(\)\-/]'''
     
     # 分割拼音和标点
     tokens = re.split(r'[\s]+', pinyin_str.strip())
