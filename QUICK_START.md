@@ -150,6 +150,7 @@ outputs/5k_model/
 | 快速训练 5 分钟 | `python model/train_pinhan.py --data data/5k.jsonl --epochs 5` |
 | 标准训练（40 epochs） | `python model/train_pinhan.py --data data/5k.jsonl --epochs 40` |
 | 恢复中断的训练 | `python model/train_pinhan.py --data data/5k.jsonl --resume` |
+| 有未提交更改时强制训练 | `python model/train_pinhan.py --data data/5k.jsonl --force` |
 | 简单推理 | `python model/infer_pinhan.py --model outputs/5k_model/best_model.pt --pinyin "ni3 hao3"` |
 | 束搜索推理 | `python model/infer_pinhan.py --model outputs/5k_model/best_model.pt --pinyin "ni3 hao3" --beam-size 3` |
 | 运行测试 | `python tests/run_tests.py` |
@@ -157,7 +158,7 @@ outputs/5k_model/
 
 ---
 
-## ⚠️ 常见问题（3 个）
+## ⚠️ 常见问题（4 个）
 
 ### ❌ "No module named 'torch'"
 ```bash
@@ -181,6 +182,19 @@ ls outputs/5k_model/best_model.pt  # 应该存在
 
 # 如果不存在，重新训练
 python model/train_pinhan.py --data data/5k.jsonl
+```
+
+### ⚠️ "Uncommitted changes detected"
+```bash
+# 说明：训练前检测到未提交的代码更改
+# 这是为了确保训练的可复现性
+
+# 解决方案1：提交您的更改
+git add .
+git commit -m "Your commit message"
+
+# 解决方案2：使用 --force 标志跳过检查（不推荐）
+python model/train_pinhan.py --data data/5k.jsonl --force
 ```
 
 ---

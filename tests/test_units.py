@@ -18,6 +18,7 @@ from pinyin_utils import (
     extract_tone,
     tone_mark_to_number,
 )
+from git_utils import get_git_info, check_uncommitted_changes, save_git_info_to_checkpoint
 
 
 class TestVocab(unittest.TestCase):
@@ -219,6 +220,45 @@ class TestDataLoading(unittest.TestCase):
                     self.fail(f"无法解析JSONL行: {e}")
         
         self.assertGreater(count, 0)
+
+
+class TestGitUtils(unittest.TestCase):
+    """测试 Git 工具函数."""
+    
+    def test_get_git_info(self):
+        """测试获取 Git 信息."""
+        info = get_git_info()
+        self.assertIn('is_git_repo', info)
+        self.assertIn('commit_hash', info)
+        self.assertIn('branch', info)
+        self.assertIn('has_uncommitted_changes', info)
+        self.assertIn('uncommitted_files', info)
+        
+        # 在 git 仓库中应该检测到是 git repo
+        if info['is_git_repo']:
+            self.assertIsInstance(info['commit_hash'], (str, type(None)))
+            self.assertIsInstance(info['branch'], (str, type(None)))
+            self.assertIsInstance(info['has_uncommitted_changes'], bool)
+            self.assertIsInstance(info['uncommitted_files'], list)
+    
+    def test_check_uncommitted_changes_with_force(self):
+        """测试带 force 标志的未提交更改检查."""
+        should_proceed, msg = check_uncommitted_changes(force=True)
+        # 使用 force=True 应该总是允许继续
+        self.assertTrue(should_proceed)
+        self.assertIsInstance(msg, str)
+    
+    def test_save_git_info_to_checkpoint(self):
+        """测试保存 Git 信息到检查点."""
+        checkpoint = {'epoch': 1, 'loss': 0.5}
+        save_git_info_to_checkpoint(checkpoint)
+        
+        # 如果在 git 仓库中，应该添加 git_info
+        info = get_git_info()
+        if info['is_git_repo']:
+            self.assertIn('git_info', checkpoint)
+            self.assertIn('commit_hash', checkpoint['git_info'])
+            self.assertIn('branch', checkpoint['git_info'])
 
 
 if __name__ == '__main__':
