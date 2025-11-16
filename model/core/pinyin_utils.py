@@ -8,9 +8,13 @@
 - 多音字识别（如果相同汉字有多个拼音）
 """
 import re
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Set
 from collections import defaultdict
 
+# 🚀 优化：预编译常用正则表达式（避免每次调用时重新编译）
+# 注意：允许0表示轻声，1-4表示声调
+_TONE_MARK_PATTERN = re.compile(r'^[a-z]+[0-4]?$')
+_PINYIN_BASE_PATTERN = re.compile(r'^([a-z\d]*?)(\d?)$')
 
 # 声调标记符号到数字的映射（用于 tone mark 转 tone number）
 # 映射格式：标记字符 -> (字母, 音调号)
@@ -108,6 +112,9 @@ LIGHT_TONE_PINYINS = {
     'er': 'er0',      # 儿/耳（在词尾时为轻声）
 }
 
+# 🚀 优化：缓存轻声拼音的keys集合（用于快速lookup）
+_LIGHT_TONE_PINYINS_KEYS = frozenset(LIGHT_TONE_PINYINS.keys())
+
 
 def tone_mark_to_number(pinyin_with_mark: str) -> str:
     """
@@ -124,8 +131,9 @@ def tone_mark_to_number(pinyin_with_mark: str) -> str:
         数字音调形式的拼音（如 'ma1'）
         如果无法转换，返回原字符串
     """
-    if not pinyin_with_mark:
-        return ''
+    # 🚀 优化：快路径检查（大多数拼音不包含声调标记）
+    if not pinyin_with_mark or all(c not in TONE_MARK_TO_NUM for c in pinyin_with_mark):
+        return pinyin_with_mark
     
     result = []
     tone = ''
@@ -155,7 +163,13 @@ def normalize_pinyin(pinyin: str) -> str:
     
     Returns:
         规范化后的拼音
+    
+    Raises:
+        ValueError: 如果输入为空或无效
     """
+    if not pinyin or not pinyin.strip():
+        raise ValueError("拼音不能为空")
+    
     pinyin = pinyin.strip().lower()
     
     # 转换 tone mark 到 tone number
@@ -196,15 +210,15 @@ def normalize_light_tone(pinyin: str) -> str:
         这是重要的修复，因为数据中 28.1% 的样本包含轻声拼音，
         如果不处理这些拼音，模型在推理时会将其识别为 <unk>（未知词）。
     """
-    # 如果已经包含数字声调，不处理
-    if any(c.isdigit() for c in pinyin):
-        return pinyin
+    # 🚀 优化：快路径检查（避免不必要的字符遍历）
+    if pinyin and pinyin[-1].isdigit():
+        return pinyin  # 已经有声调，快速返回
     
-    # 如果在轻声表中，添加"0"
-    if pinyin.lower() in LIGHT_TONE_PINYINS:
-        return LIGHT_TONE_PINYINS[pinyin.lower()]
+    # 使用缓存的keys集合进行快速lookup（O(1)）
+    pinyin_lower = pinyin.lower()
+    if pinyin_lower in _LIGHT_TONE_PINYINS_KEYS:
+        return LIGHT_TONE_PINYINS[pinyin_lower]
     
-    # 否则返回原样
     return pinyin
 
 
@@ -219,7 +233,8 @@ def extract_tone(pinyin: str) -> Tuple[str, Optional[str]]:
         (拼音不含音调部分, 音调号)，例如 ('ma', '1')
         如果没有音调则返回 (拼音, None)
     """
-    match = re.match(r'^([a-z\d]*?)(\d?)$', pinyin)
+    # 🚀 优化：使用预编译的正则表达式
+    match = _PINYIN_BASE_PATTERN.match(pinyin)
     if match:
         base, tone = match.groups()
         return base, tone if tone else None
@@ -254,8 +269,9 @@ def validate_pinyin(pinyin: str) -> bool:
     验证拼音是否有效。
     
     有效拼音应该：
+    - 不为空
     - 包含至少一个字母
-    - 可能包含数字音调（0-4）- 0 表示轻声
+    - 可能包含数字音调（0-4），其中 0 表示轻声
     - 不应该包含其他特殊字符
     
     Args:
@@ -264,22 +280,12 @@ def validate_pinyin(pinyin: str) -> bool:
     Returns:
         是否为有效拼音
     """
-    # 允许：a-z, v (代表ü), 数字 0-4（其中 0=轻声）
-    pattern = r'^[a-z\d]+$'
-    if not re.match(pattern, pinyin):
+    # 🚀 优化：快路径检查
+    if not pinyin or not pinyin.strip():
         return False
     
-    # 检查是否至少有一个字母
-    if not any(c.isalpha() for c in pinyin):
-        return False
-    
-    # 检查声调数字是否有效（只能是 0-4）
-    tone_digits = [c for c in pinyin if c.isdigit()]
-    for digit in tone_digits:
-        if digit not in '01234':
-            return False
-    
-    return True
+    # 使用预编译的正则表达式（允许：a-z, v (代表ü), 数字 0-4（0=轻声, 1-4=声调））
+    return _TONE_MARK_PATTERN.match(pinyin) is not None
 
 
 def validate_pinyin_sequence(pinyin_str: str, separator: str = ' ') -> bool:
@@ -291,10 +297,18 @@ def validate_pinyin_sequence(pinyin_str: str, separator: str = ' ') -> bool:
         separator: 拼音分隔符
     
     Returns:
-        序列中所有拼音是否都有效
+        序列中所有拼音是否都有效（空序列返回 False）
     """
+    if not pinyin_str or not pinyin_str.strip():
+        return False
+    
     pinyins = pinyin_str.split(separator)
-    return all(validate_pinyin(p.strip()) for p in pinyins if p.strip())
+    valid_pinyins = [p.strip() for p in pinyins if p.strip()]
+    
+    if not valid_pinyins:
+        return False
+    
+    return all(validate_pinyin(p) for p in valid_pinyins)
 
 
 def split_pinyin_sequence(pinyin_str: str, separator: str = ' ') -> List[str]:
@@ -307,7 +321,13 @@ def split_pinyin_sequence(pinyin_str: str, separator: str = ' ') -> List[str]:
     
     Returns:
         拼音列表
+    
+    Raises:
+        ValueError: 如果输入为空或无效
     """
+    if not pinyin_str or not pinyin_str.strip():
+        raise ValueError("拼音序列不能为空")
+    
     return [p.strip() for p in pinyin_str.split(separator) if p.strip()]
 
 
@@ -321,7 +341,13 @@ def join_pinyin_sequence(pinyins: List[str], separator: str = ' ') -> str:
     
     Returns:
         拼音序列字符串
+    
+    Raises:
+        ValueError: 如果输入列表为空
     """
+    if not pinyins:
+        raise ValueError("拼音列表不能为空")
+    
     return separator.join(pinyins)
 
 
@@ -334,7 +360,13 @@ def is_polyphonic_char(hanzi: str) -> bool:
     
     Returns:
         是否为多音字
+    
+    Raises:
+        ValueError: 如果输入不是单个汉字
     """
+    if not hanzi or len(hanzi) != 1:
+        raise ValueError("输入必须是单个汉字")
+    
     return hanzi in COMMON_POLYPHONIC_CHARS
 
 
@@ -459,7 +491,9 @@ def get_polyphonic_statistics(
 
 
 class PinyinStatistics:
-    """统计拼音和汉字的分布情况。"""
+    """
+    🚀 改进：统计拼音和汉字的分布情况（添加缓存和批量处理）。
+    """
     
     def __init__(self):
         self.pinyin_freq = defaultdict(int)
@@ -467,6 +501,9 @@ class PinyinStatistics:
         self.pinyin_hanzi_pairs = defaultdict(set)  # pinyin -> set of hanzi
         self.hanzi_pinyins = defaultdict(set)  # hanzi -> set of pinyin
         self.total_pairs = 0
+        # 缓存：延迟计算的结果
+        self._polyphonic_cache = None
+        self._homophonic_cache = None
     
     def update_from_data(self, hanzi_str: str, pinyin_str: str, separator: str = ' '):
         """
@@ -476,49 +513,145 @@ class PinyinStatistics:
             hanzi_str: 汉字字符串
             pinyin_str: 拼音序列
             separator: 拼音分隔符
+        
+        Raises:
+            ValueError: 如果汉字和拼音数量不匹配
         """
-        pinyins = split_pinyin_sequence(pinyin_str, separator)
+        try:
+            pinyins = split_pinyin_sequence(pinyin_str, separator)
+        except ValueError:
+            # 处理空序列
+            return
+        
         hanzis = list(hanzi_str)
         
+        if len(hanzis) != len(pinyins):
+            raise ValueError(f"汉字数量({len(hanzis)})与拼音数量({len(pinyins)})不匹配: {hanzi_str} vs {pinyin_str}")
+        
         # 按字符逐一关联
-        for i, (hanzi, pinyin) in enumerate(zip(hanzis, pinyins)):
+        for hanzi, pinyin in zip(hanzis, pinyins):
             self.pinyin_freq[pinyin] += 1
             self.hanzi_freq[hanzi] += 1
             self.pinyin_hanzi_pairs[pinyin].add(hanzi)
             self.hanzi_pinyins[hanzi].add(pinyin)
             self.total_pairs += 1
+        
+        # 清除缓存（数据已更新）
+        self._polyphonic_cache = None
+        self._homophonic_cache = None
+    
+    def update_from_batch(self, data: List[Tuple[str, str]]):
+        """
+        🚀 新增：批量更新统计信息（性能优化）。
+        
+        Args:
+            data: [(hanzi_str, pinyin_str), ...] 列表
+        """
+        for hanzi_str, pinyin_str in data:
+            try:
+                self.update_from_data(hanzi_str, pinyin_str)
+            except ValueError:
+                # 跳过无效数据
+                continue
     
     def get_pinyin_frequency(self, pinyin: str) -> int:
         """获取拼音出现频率。"""
-        return self.pinyin_freq[pinyin]
+        return self.pinyin_freq.get(pinyin, 0)
     
     def get_hanzi_frequency(self, hanzi: str) -> int:
         """获取汉字出现频率。"""
-        return self.hanzi_freq[hanzi]
+        return self.hanzi_freq.get(hanzi, 0)
     
     def get_polyphonic_hanzis(self) -> Dict[str, set]:
-        """获取有多个拼音的汉字（多音字）。"""
-        return {h: p for h, p in self.hanzi_pinyins.items() if len(p) > 1}
+        """
+        获取有多个拼音的汉字（多音字）。
+        
+        🚀 优化：结果缓存（延迟计算）
+        """
+        if self._polyphonic_cache is None:
+            self._polyphonic_cache = {
+                h: p for h, p in self.hanzi_pinyins.items() if len(p) > 1
+            }
+        return self._polyphonic_cache
     
     def get_homophonic_hanzis(self) -> Dict[str, set]:
-        """获取多个汉字共享同一个拼音的情况（同音字）。"""
-        return {p: h for p, h in self.pinyin_hanzi_pairs.items() if len(h) > 1}
+        """
+        获取多个汉字共享同一个拼音的情况（同音字）。
+        
+        🚀 优化：结果缓存（延迟计算）
+        """
+        if self._homophonic_cache is None:
+            self._homophonic_cache = {
+                p: h for p, h in self.pinyin_hanzi_pairs.items() if len(h) > 1
+            }
+        return self._homophonic_cache
+    
+    def get_top_pinyins(self, n: int = 20) -> List[Tuple[str, int]]:
+        """
+        🚀 新增：获取频率最高的拼音。
+        
+        Args:
+            n: 返回前n个
+        
+        Returns:
+            [(拼音, 频率), ...] 按频率降序排列
+        """
+        return sorted(self.pinyin_freq.items(), key=lambda x: x[1], reverse=True)[:n]
+    
+    def get_top_hanzis(self, n: int = 20) -> List[Tuple[str, int]]:
+        """
+        🚀 新增：获取频率最高的汉字。
+        
+        Args:
+            n: 返回前n个
+        
+        Returns:
+            [(汉字, 频率), ...] 按频率降序排列
+        """
+        return sorted(self.hanzi_freq.items(), key=lambda x: x[1], reverse=True)[:n]
+    
+    def get_stats_summary(self) -> Dict[str, any]:
+        """
+        🚀 新增：获取统计摘要字典（便于序列化和日志）。
+        
+        Returns:
+            统计摘要字典
+        """
+        polyphonic = self.get_polyphonic_hanzis()
+        homophonic = self.get_homophonic_hanzis()
+        
+        return {
+            'total_pairs': self.total_pairs,
+            'unique_pinyins': len(self.pinyin_freq),
+            'unique_hanzis': len(self.hanzi_freq),
+            'polyphonic_count': len(polyphonic),
+            'homophonic_count': len(homophonic),
+            'avg_pinyins_per_hanzi': self.total_pairs / len(self.hanzi_freq) if self.hanzi_freq else 0,
+            'avg_hanzis_per_pinyin': self.total_pairs / len(self.pinyin_freq) if self.pinyin_freq else 0,
+        }
     
     def print_summary(self):
         """打印统计摘要。"""
-        polyphonic = self.get_polyphonic_hanzis()
-        homophonic = self.get_homophonic_hanzis()
-        print(f"总拼音-汉字对数: {self.total_pairs}")
-        print(f"唯一拼音数: {len(self.pinyin_freq)}")
-        print(f"唯一汉字数: {len(self.hanzi_freq)}")
-        print(f"多音字数: {len(polyphonic)}")
-        print(f"同音字组数: {len(homophonic)}")
+        stats = self.get_stats_summary()
+        print(f"总拼音-汉字对数: {stats['total_pairs']}")
+        print(f"唯一拼音数: {stats['unique_pinyins']}")
+        print(f"唯一汉字数: {stats['unique_hanzis']}")
+        print(f"多音字数: {stats['polyphonic_count']}")
+        print(f"同音字组数: {stats['homophonic_count']}")
+        print(f"平均每个汉字对应{stats['avg_pinyins_per_hanzi']:.2f}个拼音")
+        print(f"平均每个拼音对应{stats['avg_hanzis_per_pinyin']:.2f}个汉字")
         
         # 打印多音字示例
+        polyphonic = self.get_polyphonic_hanzis()
         if polyphonic:
             print("\n多音字示例（前10个）:")
             for hanzi, pinyins in list(polyphonic.items())[:10]:
                 print(f"  {hanzi}: {', '.join(sorted(pinyins))}")
+        
+        # 打印频率最高的拼音
+        print("\n频率最高的拼音（前10个）:")
+        for pinyin, freq in self.get_top_pinyins(10):
+            print(f"  {pinyin}: {freq} 次")
 
 
 if __name__ == '__main__':
@@ -529,26 +662,65 @@ if __name__ == '__main__':
         'hǎo',
         'BEIJING',
         'zhōng',
+        'le',  # 轻声拼音
+        'de',
     ]
     for case in test_cases:
-        normalized = normalize_pinyin(case)
-        print(f"{case} -> {normalized}")
+        try:
+            normalized = normalize_pinyin(case)
+            normalized = normalize_light_tone(normalized)
+            print(f"{case:15s} -> {normalized}")
+        except ValueError as e:
+            print(f"{case:15s} -> ERROR: {e}")
     
     print("\n=== 拼音提取测试 ===")
-    test_pinyins = ['ma1', 'hao', 'zhang3']
+    test_pinyins = ['ma1', 'hao', 'zhang3', 'le0']
     for p in test_pinyins:
-        base, tone = extract_tone(p)
-        print(f"{p} -> base='{base}', tone='{tone}'")
+        try:
+            base, tone = extract_tone(p)
+            print(f"{p:10s} -> base='{base}', tone='{tone}'")
+        except Exception as e:
+            print(f"{p:10s} -> ERROR: {e}")
     
     print("\n=== 拼音验证测试 ===")
-    test_validations = ['ma1', 'h3o', 'xyz', 'ma', 'ma5']
+    test_validations = ['ma1', 'h3o', 'xyz', 'ma', 'ma5', 'le0']
     for p in test_validations:
-        is_valid = validate_pinyin(p)
-        print(f"{p} -> valid={is_valid}")
+        try:
+            is_valid = validate_pinyin(p)
+            print(f"{p:10s} -> valid={is_valid}")
+        except Exception as e:
+            print(f"{p:10s} -> ERROR: {e}")
     
     print("\n=== 多音字检查 ===")
-    test_hanzis = ['中', '长', '行', '好']
+    test_hanzis = ['中', '长', '行', '好', '我']
     for h in test_hanzis:
-        is_poly = is_polyphonic_char(h)
-        pinyins = get_possible_pinyins(h)
-        print(f"{h} -> polyphonic={is_poly}, pinyins={pinyins}")
+        try:
+            is_poly = is_polyphonic_char(h)
+            pinyins = get_possible_pinyins(h)
+            print(f"{h} -> polyphonic={is_poly}, pinyins={pinyins}")
+        except Exception as e:
+            print(f"{h} -> ERROR: {e}")
+    
+    print("\n=== 拼音序列处理测试 ===")
+    test_seq = "ni3 hao3 jia1 hao4"
+    try:
+        split = split_pinyin_sequence(test_seq)
+        print(f"拆分: {test_seq} -> {split}")
+        joined = join_pinyin_sequence(split)
+        print(f"合并: {split} -> {joined}")
+    except Exception as e:
+        print(f"ERROR: {e}")
+    
+    print("\n=== 统计测试 ===")
+    stats = PinyinStatistics()
+    test_data = [
+        ("你好", "ni3 hao3"),
+        ("中国", "zhong1 guo2"),
+        ("中心", "zhong1 xin1"),
+        ("好的", "hao3 de5"),
+    ]
+    try:
+        stats.update_from_batch(test_data)
+        stats.print_summary()
+    except Exception as e:
+        print(f"ERROR: {e}")

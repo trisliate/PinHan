@@ -6,19 +6,25 @@ import random
 import sys
 import logging
 import time
+import warnings
 from pathlib import Path
 from datetime import datetime
 import argparse
+
+# 抑制 PyTorch 的性能建议和安全建议警告
+warnings.filterwarnings('ignore', category=UserWarning, module='torch.nn.modules.transformer')
+warnings.filterwarnings('ignore', category=FutureWarning, message='You are using `torch.load`')
+
 import orjson
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import torch.optim as optim
 
-sys.path.insert(0, str(Path(__file__).parent.parent / 'preprocess'))
-from seq2seq_transformer import Vocab, Seq2SeqTransformer, generate_square_subsequent_mask
-from pinyin_utils import normalize_pinyin_sequence, validate_pinyin_sequence
-from checkpoint_manager import TrainingCheckpointManager, resume_or_init, load_trained_model
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from model.core import Vocab, Seq2SeqTransformer, generate_square_subsequent_mask
+from model.core import TrainingCheckpointManager, resume_or_init, load_trained_model
+from model.core import normalize_pinyin_sequence, validate_pinyin_sequence
 
 DATA_PATH = Path('data/clean_wiki.jsonl')
 
@@ -220,13 +226,11 @@ def train_one_epoch(
         src_key_padding_mask = (src.transpose(0, 1) == src_vocab.token_to_id[src_vocab.pad_token])
         tgt_key_padding_mask = (tgt_input.transpose(0, 1) == tgt_vocab.token_to_id[tgt_vocab.pad_token])
         
-        # 统一 mask 类型为 float
-        # - tgt_mask: 因果掩码，类型为 float（-inf 和 0.0）
-        # - src_key_padding_mask: bool → float
-        # - tgt_key_padding_mask: bool → float
-        # PyTorch Transformer 要求所有 mask 类型一致
-        src_key_padding_mask = src_key_padding_mask.float()
-        tgt_key_padding_mask = tgt_key_padding_mask.float()
+        # 统一 mask 类型为 bool（推荐做法）
+        # - tgt_mask: 因果掩码（float 类型 -inf/0.0，已在 generate_square_subsequent_mask 中生成）
+        # - src_key_padding_mask: bool （True 表示屏蔽，False 表示允许）
+        # - tgt_key_padding_mask: bool
+        # PyTorch Transformer 可以自动处理混合类型，但保持一致更清晰
         
         optimizer.zero_grad()
         logits = model(

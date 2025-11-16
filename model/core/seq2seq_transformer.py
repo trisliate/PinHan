@@ -107,24 +107,33 @@ class PositionalEncoding(nn.Module):
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         
-        # 修复：正确处理奇偶维度
+        # 正确处理奇偶维度
         # 当 d_model 为偶数时，1::2 和 div_term 长度相同
-        # 当 d_model 为奇数时，1::2 比 div_term 少一个元素
+        # 当 d_model 为奇数时，1::2 的长度为 (d_model+1)//2，而 div_term 长度为 d_model//2
+        # 应该将 div_term 的第一个 (d_model+1)//2 - 1 个元素用于余弦编码
         if d_model % 2 == 0:
             pe[:, 1::2] = torch.cos(position * div_term)
         else:
-            pe[:, 1::2] = torch.cos(position * div_term[:, :-1])
+            pe[:, 1::2] = torch.cos(position * div_term)
         
         pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """应用位置编码."""
-        if x.size(0) <= self.pe.size(1) and x.size(0) != x.size(1):
-            pe = self.pe[0, :x.size(0), :].unsqueeze(1)
-            x = x + pe
-        else:
-            x = x + self.pe[:, :x.size(1), :]
+        """应用位置编码.
+        
+        Args:
+            x: 形状为 (seq_len, batch_size, d_model) 的张量
+        
+        Returns:
+            加上位置编码的张量
+        """
+        seq_len = x.size(0)
+        # 获取对应长度的位置编码
+        # pe shape: (1, max_len, d_model) -> 取出 (seq_len, 1, d_model)
+        # 用 (seq_len, 1, d_model) 加 (seq_len, batch_size, d_model) 会自动 broadcast
+        pe = self.pe[0, :seq_len, :].unsqueeze(1)  # 形状: (seq_len, 1, d_model)
+        x = x + pe
         return self.dropout(x)
 
 

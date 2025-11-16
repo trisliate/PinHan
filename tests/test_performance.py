@@ -7,10 +7,7 @@ import time
 from pathlib import Path
 import torch
 
-sys.path.insert(0, str(Path(__file__).parent.parent / 'model'))
-sys.path.insert(0, str(Path(__file__).parent.parent / 'preprocess'))
-
-from seq2seq_transformer import Vocab, Seq2SeqTransformer, generate_square_subsequent_mask
+from model.core import Vocab, Seq2SeqTransformer, generate_square_subsequent_mask
 
 
 class TestInferencePerformance(unittest.TestCase):

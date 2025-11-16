@@ -3,14 +3,19 @@ import sys
 import time
 import argparse
 import re
+import warnings
 from pathlib import Path
 import orjson
 import torch
 import torch.nn.functional as F
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent.parent / 'preprocess'))
-from seq2seq_transformer import Seq2SeqTransformer, Vocab, generate_square_subsequent_mask
-from pinyin_utils import normalize_pinyin_sequence, normalize_light_tone
+
+# 抑制 PyTorch 警告
+warnings.filterwarnings('ignore', category=UserWarning, module='torch.nn.modules.transformer')
+warnings.filterwarnings('ignore', category=FutureWarning, message='You are using `torch.load`')
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from model.core import Seq2SeqTransformer, Vocab, generate_square_subsequent_mask
+from model.core import normalize_pinyin_sequence, normalize_light_tone
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -85,7 +90,7 @@ def load_model(
         pad_idx_src=pad_idx_src,
         pad_idx_tgt=pad_idx_tgt,
     )
-    ckpt = torch.load(str(model_path), map_location=device)
+    ckpt = torch.load(str(model_path), map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
     model.to(device)
     model.eval()

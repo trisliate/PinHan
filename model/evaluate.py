@@ -5,8 +5,10 @@ from pathlib import Path
 from collections import defaultdict
 import torch
 import torch.nn.functional as F
-sys.path.insert(0, str(Path(__file__).parent))
-from seq2seq_transformer import Seq2SeqTransformer, Vocab, generate_square_subsequent_mask
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from model.core import Seq2SeqTransformer, Vocab, generate_square_subsequent_mask
+from model.core import extract_tone
 
 # 常见多音字表（与 pinyin_utils.py 保持同步）
 COMMON_POLYPHONIC_CHARS = {

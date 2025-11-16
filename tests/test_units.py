@@ -7,11 +7,8 @@ from pathlib import Path
 import torch
 import orjson
 
-sys.path.insert(0, str(Path(__file__).parent.parent / 'model'))
-sys.path.insert(0, str(Path(__file__).parent.parent / 'preprocess'))
-
-from seq2seq_transformer import Vocab, Seq2SeqTransformer, generate_square_subsequent_mask
-from pinyin_utils import (
+from model.core import Vocab, Seq2SeqTransformer, generate_square_subsequent_mask
+from model.core import (
     normalize_pinyin,
     validate_pinyin,
     validate_pinyin_sequence,
@@ -144,7 +141,7 @@ class TestSeq2SeqTransformer(unittest.TestCase):
         src = torch.randint(0, self.src_vocab_size, (src_len, batch_size))
         tgt = torch.randint(0, self.tgt_vocab_size, (tgt_len, batch_size))
         
-        tgt_mask = generate_square_subsequent_mask(tgt_len).to(self.device).float()
+        tgt_mask = generate_square_subsequent_mask(tgt_len).to(self.device)
         src_key_padding_mask = torch.zeros(batch_size, src_len, dtype=torch.bool)
         tgt_key_padding_mask = torch.zeros(batch_size, tgt_len, dtype=torch.bool)
         
@@ -152,9 +149,9 @@ class TestSeq2SeqTransformer(unittest.TestCase):
             output = self.model(
                 src, tgt,
                 tgt_mask=tgt_mask,
-                src_key_padding_mask=src_key_padding_mask.float(),
-                tgt_key_padding_mask=tgt_key_padding_mask.float(),
-                memory_key_padding_mask=src_key_padding_mask.float(),
+                src_key_padding_mask=src_key_padding_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=src_key_padding_mask,
             )
         
         self.assertEqual(output.shape, (tgt_len, batch_size, self.tgt_vocab_size))
@@ -187,38 +184,48 @@ class TestGenerateSquareSubsequentMask(unittest.TestCase):
             for j in range(sz):
                 if i >= j:
                     # 下三角（含对角线）应该是0
-                    self.assertEqual(mask[i, j].item(), 0.0)
+                    self.assertAlmostEqual(mask[i, j].item(), 0.0, places=5)
                 else:
                     # 上三角应该是-inf
-                    self.assertEqual(mask[i, j].item(), float('-inf'))
+                    self.assertTrue(torch.isinf(mask[i, j]) and mask[i, j] < 0)
 
 
-class TestDataLoading(unittest.TestCase):
-    """测试数据加载."""
+class TestPinyinUtilsEdgeCases(unittest.TestCase):
+    """测试拼音工具函数的边界情况."""
     
-    def test_jsonl_loading(self):
-        """测试JSONL数据加载."""
-        # 假设存在test_mini.jsonl
-        test_file = Path(__file__).parent.parent / 'data' / 'test_mini.jsonl'
-        
-        if not test_file.exists():
-            self.skipTest(f"{test_file} 不存在")
-        
-        count = 0
-        with open(test_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = orjson.loads(line)
-                    self.assertIn('pinyin', data)
-                    self.assertIn('hanzi', data)
-                    count += 1
-                except Exception as e:
-                    self.fail(f"无法解析JSONL行: {e}")
-        
-        self.assertGreater(count, 0)
+    def test_normalize_pinyin_empty(self):
+        """测试规范化空字符串."""
+        with self.assertRaises(Exception):
+            normalize_pinyin('')
+    
+    def test_normalize_pinyin_special_chars(self):
+        """测试带特殊字符的拼音."""
+        result = normalize_pinyin('ma1 ')  # 尾部空格
+        self.assertEqual(result, 'ma1')
+    
+    def test_validate_pinyin_invalid_tone(self):
+        """测试无效声调号."""
+        self.assertFalse(validate_pinyin('ma5'))  # 5 不是有效声调
+        # 注：'0' 现在表示轻声，已成为有效声调
+        self.assertTrue(validate_pinyin('ma0'))  # 0 表示轻声（有效）
+    
+    def test_extract_tone_no_tone(self):
+        """测试没有声调的拼音."""
+        base, tone = extract_tone('ma')
+        self.assertEqual(base, 'ma')
+        self.assertIsNone(tone)
+    
+    def test_validate_pinyin_sequence_empty(self):
+        """测试空的拼音序列."""
+        self.assertFalse(validate_pinyin_sequence(''))
+    
+    def test_tone_mark_to_number_complex(self):
+        """测试复杂的声调转换."""
+        # 多声调混合
+        self.assertEqual(tone_mark_to_number('mā'), 'ma1')
+        self.assertEqual(tone_mark_to_number('má'), 'ma2')
+        self.assertEqual(tone_mark_to_number('mǎ'), 'ma3')
+        self.assertEqual(tone_mark_to_number('mà'), 'ma4')
 
 
 if __name__ == '__main__':

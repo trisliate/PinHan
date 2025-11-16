@@ -136,8 +136,8 @@ python -m unittest tests.test_units.TestVocab.test_encode_decode
 │   │   ├── PositionalEncoding ✅
 │   │   ├── Seq2SeqTransformer ✅
 │   │   └── generate_square_subsequent_mask ✅
-│   ├── train_pinhan.py ⚠️ 50% (基础功能在集成测试中)
-│   ├── infer_pinhan.py ⚠️ 50% (基础功能在集成测试中)
+│   ├── train.py ⚠️ 50% (基础功能在集成测试中)
+│   ├── infer.py ⚠️ 50% (基础功能在集成测试中)
 │   └── evaluate.py ⚠️ 0% (功能正确性由集成测试验证)
 └── preprocess/
     ├── pinyin_utils.py ✅ 100%
