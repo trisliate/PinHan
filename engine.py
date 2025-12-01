@@ -4,28 +4,87 @@ IME-SLM 引擎主入口
 职责：协调各子模块，完成 拼音 -> 汉字候选 的完整流程
 """
 
+import os
 from typing import List, Optional
+import torch
+
 from config import EngineConfig, EngineOutput, CandidateResult, DEFAULT_CONFIG
 
 
 class IMEEngine:
     """输入法引擎主类"""
     
-    def __init__(self, config: Optional[EngineConfig] = None):
+    def __init__(self, config: Optional[EngineConfig] = None, model_dir: str = None):
         self.config = config or DEFAULT_CONFIG
+        self.model_dir = model_dir or os.path.dirname(__file__)
         
-        # 子模块占位（后续模块实现后替换）
+        # 子模块
+        self.dict_service = None   # 词典服务
         self.corrector = None      # 模块4: PinyinCorrector
         self.segmenter = None      # 模块5: PinyinSegmenter
         self.p2h_model = None      # 模块6: P2HModel
-        self.slm_reranker = None   # 模块7: SLMReranker
+        self.p2h_vocab = None      # P2H 词表
+        self.slm_model = None      # 模块7: SLModel
+        self.slm_vocab = None      # SLM 词表
+        self.reranker = None       # 重排序器
+        
+        # 设备
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         self._init_modules()
     
     def _init_modules(self):
         """初始化各子模块"""
-        # TODO: 模块4-7实现后在此初始化
-        pass
+        # 词典服务
+        from dicts import DictionaryService
+        dicts_dir = os.path.join(self.model_dir, 'dicts')
+        self.dict_service = DictionaryService(dicts_dir)
+        
+        # 拼音纠错
+        from corrector import create_corrector_from_dict
+        char_dict_path = os.path.join(dicts_dir, 'char_dict.json')
+        self.corrector = create_corrector_from_dict(char_dict_path)
+        
+        # 拼音切分
+        from segmenter import create_segmenter_from_dict
+        self.segmenter = create_segmenter_from_dict(char_dict_path)
+        
+        # P2H 模型（如果存在检查点）
+        p2h_checkpoint = os.path.join(self.model_dir, 'checkpoints', 'best_model.pt')
+        p2h_vocab_path = os.path.join(self.model_dir, 'checkpoints', 'vocab.json')
+        
+        if os.path.exists(p2h_checkpoint) and os.path.exists(p2h_vocab_path):
+            from p2h import P2HModel, P2HVocab
+            
+            # 加载词表
+            self.p2h_vocab = P2HVocab()
+            self.p2h_vocab.load(p2h_vocab_path)
+            
+            # 加载模型
+            checkpoint = torch.load(p2h_checkpoint, map_location=self.device)
+            self.p2h_model = P2HModel(checkpoint['config']).to(self.device)
+            self.p2h_model.load_state_dict(checkpoint['model_state_dict'])
+            self.p2h_model.eval()
+        
+        # SLM 模型（如果存在检查点）
+        slm_checkpoint = os.path.join(self.model_dir, 'checkpoints', 'slm_best.pt')
+        slm_vocab_path = os.path.join(self.model_dir, 'checkpoints', 'slm_vocab.json')
+        
+        if os.path.exists(slm_checkpoint) and os.path.exists(slm_vocab_path):
+            from slm import SLModel, SLMVocab, CandidateReranker
+            
+            # 加载词表
+            self.slm_vocab = SLMVocab()
+            self.slm_vocab.load(slm_vocab_path)
+            
+            # 加载模型
+            checkpoint = torch.load(slm_checkpoint, map_location=self.device)
+            self.slm_model = SLModel(checkpoint['config']).to(self.device)
+            self.slm_model.load_state_dict(checkpoint['model_state_dict'])
+            self.slm_model.eval()
+            
+            # 重排序器
+            self.reranker = CandidateReranker(self.slm_model, self.slm_vocab, self.device)
     
     def process(self, pinyin: str, context: str = "") -> EngineOutput:
         """
@@ -40,61 +99,161 @@ class IMEEngine:
         """
         output = EngineOutput(raw_pinyin=pinyin)
         
-        # Step 1: 拼音纠错
-        corrected = self._correct_pinyin(pinyin)
-        output.corrected_pinyin = corrected
+        # Step 1: 拼音切分（如果没有空格分隔）
+        if ' ' not in pinyin:
+            segment_result = self.segmenter.segment_best(pinyin)
+            if segment_result:
+                segments = segment_result.segments
+            else:
+                segments = [pinyin]
+        else:
+            segments = pinyin.split()
         
-        # Step 2: 拼音切分
-        segments = self._segment_pinyin(corrected)
-        output.segmented_pinyin = segments
+        # Step 2: 拼音纠错
+        corrected_segments = []
+        for seg in segments:
+            corrections = self.corrector.correct(seg, top_k=1)
+            if corrections:
+                corrected_segments.append(corrections[0].pinyin)
+            else:
+                corrected_segments.append(seg)
+        
+        output.corrected_pinyin = ' '.join(corrected_segments)
+        output.segmented_pinyin = corrected_segments
         
         # Step 3: P2H 转换
-        candidates = self._pinyin_to_hanzi(segments)
+        candidates = self._pinyin_to_hanzi(corrected_segments)
         
         # Step 4: SLM 语义重排
-        if self.config.enable_slm_rerank and context:
-            candidates = self._rerank_candidates(candidates, context)
+        if self.config.enable_slm_rerank and self.reranker and len(candidates) > 1:
+            candidate_texts = [c.text for c in candidates]
+            candidate_scores = [c.score for c in candidates]
+            
+            reranked = self.reranker.rerank(candidate_texts, candidate_scores, alpha=0.7)
+            
+            candidates = [
+                CandidateResult(text=text, score=score, source="reranked")
+                for text, score in reranked
+            ]
         
         # Step 5: 截断并输出
         output.candidates = candidates[:self.config.top_k]
         
         return output
     
-    def _correct_pinyin(self, pinyin: str) -> str:
-        """拼音纠错"""
-        if self.corrector is None:
-            # 模块未实现，直接返回原输入
-            return pinyin
-        return self.corrector.correct(pinyin)
-    
-    def _segment_pinyin(self, pinyin: str) -> List[str]:
-        """拼音切分"""
-        if self.segmenter is None:
-            # 模块未实现，简单按空格切分
-            return pinyin.split() if " " in pinyin else [pinyin]
-        return self.segmenter.segment(pinyin)
-    
     def _pinyin_to_hanzi(self, segments: List[str]) -> List[CandidateResult]:
         """拼音转汉字"""
-        if self.p2h_model is None:
-            # 模块未实现，返回占位结果
-            return [CandidateResult(text="[P2H未实现]", score=0.0, source="placeholder")]
-        return self.p2h_model.predict(segments)
+        candidates = []
+        
+        # 方法1: 使用 P2H 模型（如果已加载）
+        if self.p2h_model is not None and self.p2h_vocab is not None:
+            try:
+                model_candidates = self._p2h_model_predict(segments)
+                candidates.extend(model_candidates)
+            except Exception as e:
+                pass  # 静默失败，使用词典回退
+        
+        # 方法2: 词典查询（回退方案，或补充候选）
+        dict_candidates = self._dict_lookup(segments)
+        
+        # 合并候选，去重
+        seen = set()
+        merged = []
+        for c in candidates + dict_candidates:
+            if c.text not in seen:
+                seen.add(c.text)
+                merged.append(c)
+        
+        # 按分数排序
+        merged.sort(key=lambda x: x.score, reverse=True)
+        
+        return merged[:self.config.top_k * 2]  # 多返回一些给重排序
     
-    def _rerank_candidates(
-        self, 
-        candidates: List[CandidateResult], 
-        context: str
-    ) -> List[CandidateResult]:
-        """语义重排"""
-        if self.slm_reranker is None:
-            return candidates
-        return self.slm_reranker.rerank(candidates, context)
+    def _p2h_model_predict(self, segments: List[str]) -> List[CandidateResult]:
+        """使用 P2H 模型预测"""
+        # 编码拼音
+        pinyin_ids = self.p2h_vocab.encode_pinyin(segments)
+        pinyin_tensor = torch.tensor([pinyin_ids], dtype=torch.long, device=self.device)
+        
+        # Beam Search
+        results = self.p2h_model.beam_search(pinyin_tensor, beam_size=self.config.top_k)
+        
+        candidates = []
+        for token_ids, score in results:
+            text = self.p2h_vocab.decode_hanzi(token_ids[0].tolist())
+            if text:
+                candidates.append(CandidateResult(
+                    text=text,
+                    score=float(score),
+                    source="p2h_model"
+                ))
+        
+        return candidates
+    
+    def _dict_lookup(self, segments: List[str]) -> List[CandidateResult]:
+        """词典查询方式生成候选"""
+        candidates = []
+        
+        if len(segments) == 1:
+            # 单字/单词查询
+            pinyin = segments[0]
+            
+            # 查字
+            chars = self.dict_service.get_chars(pinyin)
+            for char in chars[:10]:
+                freq = self.dict_service.get_char_freq(char)
+                candidates.append(CandidateResult(
+                    text=char,
+                    score=freq,
+                    source="dict_char"
+                ))
+            
+            # 查词（单拼音作为列表传入）
+            words = self.dict_service.get_words([pinyin])
+            for word in words[:10]:
+                freq = self.dict_service.get_word_freq(word)
+                candidates.append(CandidateResult(
+                    text=word,
+                    score=freq + 0.1,  # 词略优先
+                    source="dict_word"
+                ))
+        else:
+            # 多音节：组合查询
+            # 尝试整体作为词查询
+            words = self.dict_service.get_words(segments)
+            for word in words[:5]:
+                freq = self.dict_service.get_word_freq(word)
+                candidates.append(CandidateResult(
+                    text=word,
+                    score=freq + 0.2,
+                    source="dict_word"
+                ))
+            
+            # 逐字查询组合
+            if len(segments) <= 6:  # 限制长度避免组合爆炸
+                char_options = []
+                for seg in segments:
+                    chars = self.dict_service.get_chars(seg)
+                    if chars:
+                        char_options.append(chars[:3])
+                    else:
+                        char_options.append(['?'])
+                
+                # 简单组合（只取第一个）
+                if char_options:
+                    first_combo = ''.join([opts[0] for opts in char_options])
+                    candidates.append(CandidateResult(
+                        text=first_combo,
+                        score=0.5,
+                        source="dict_combo"
+                    ))
+        
+        return candidates
 
 
-def create_engine(config: Optional[EngineConfig] = None) -> IMEEngine:
+def create_engine(config: Optional[EngineConfig] = None, model_dir: str = None) -> IMEEngine:
     """工厂函数：创建引擎实例"""
-    return IMEEngine(config)
+    return IMEEngine(config, model_dir)
 
 
 # 简单测试
