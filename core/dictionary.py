@@ -22,6 +22,9 @@ TONE_MARKS = {
     'ü': ('v', 0), 'ń': ('n', 2), 'ň': ('n', 3), 'ǹ': ('n', 4),
 }
 
+# 默认字典目录
+DEFAULT_DICT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'dicts')
+
 
 class PinyinUtils:
     """拼音工具类"""
@@ -82,8 +85,8 @@ class PinyinUtils:
 class DictionaryService:
     """字典服务主类"""
     
-    def __init__(self, dict_dir: str = "dicts"):
-        self.dict_dir = dict_dir
+    def __init__(self, dict_dir: Optional[str] = None):
+        self.dict_dir = dict_dir or DEFAULT_DICT_DIR
         
         # 数据存储
         self._pinyin_set: set = set()           # 合法拼音集合
@@ -233,7 +236,7 @@ class DictionaryService:
 _dict_service: Optional[DictionaryService] = None
 
 
-def get_dict_service(dict_dir: str = "dicts") -> DictionaryService:
+def get_dict_service(dict_dir: Optional[str] = None) -> DictionaryService:
     """获取字典服务单例"""
     global _dict_service
     if _dict_service is None:

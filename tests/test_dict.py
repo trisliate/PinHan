@@ -7,7 +7,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dicts.dictionary import (
+from core.dictionary import (
     DictionaryService, 
     PinyinUtils,
     get_dict_service

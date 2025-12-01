@@ -31,11 +31,14 @@ htmlcov/
 # Data outputs and large files (only cache/temp files)
 *.sqlite3
 *.db
-outputs
-data
+outputs/
+data/
 
 # Large dataset (Wiki dump) - too large for git
 zhwiki-latest-pages-articles.xml
+
+# CC-CEDICT source file (can be re-downloaded)
+preprocess/cedict.txt.gz
 
 # OS files
 .DS_Store
