@@ -1,12 +1,15 @@
-transformers>=4.30.0,<4.46.0
-datasets
-accelerate
-sentencepiece
-torch
-numpy
-safetensors
-orjson
-pypinyin
-opencc-python-reimplemented
-bitarray
-mmh3
+# IME-SLM 依赖清单
+
+# 核心框架
+torch==2.5.1
+
+# API 服务（模块10引入）
+fastapi>=0.115.0
+uvicorn>=0.32.0
+
+# 测试
+pytest>=8.0.0
+
+# 代码质量
+black>=24.0.0
+ruff>=0.8.0
