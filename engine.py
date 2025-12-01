@@ -8,9 +8,8 @@ IME Engine v3 - 精简版
 import os
 import time
 import logging
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Tuple
 from dataclasses import dataclass, field
-from functools import lru_cache
 
 import torch
 

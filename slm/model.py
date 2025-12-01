@@ -2,7 +2,7 @@
 SLM 语义语言模型
 
 轻量级语言模型，用于评估候选句子的流畅度和语义合理性
-用于 P2H 候选结果的重排序
+用于词典候选结果的重排序
 """
 
 import math
@@ -329,7 +329,7 @@ class CandidateReranker:
     def rerank(
         self,
         candidates: List[str],
-        p2h_scores: List[float] = None,
+        dict_scores: List[float] = None,
         alpha: float = 0.7,
         context: str = "",
     ) -> List[Tuple[str, float]]:
@@ -338,8 +338,8 @@ class CandidateReranker:
         
         Args:
             candidates: 候选句子列表
-            p2h_scores: P2H 模型给出的分数（可选）
-            alpha: P2H 分数权重（1-alpha 为 SLM 权重）
+            dict_scores: 词典给出的词频分数（可选）
+            alpha: 词频分数权重（1-alpha 为 SLM 权重）
             context: 上下文文本
         
         Returns:
@@ -359,17 +359,17 @@ class CandidateReranker:
             slm_scores_norm = [0.5] * len(slm_scores)
         
         # 综合分数
-        if p2h_scores:
-            # 归一化 P2H 分数
-            min_p, max_p = min(p2h_scores), max(p2h_scores)
+        if dict_scores:
+            # 归一化词频分数
+            min_p, max_p = min(dict_scores), max(dict_scores)
             if max_p > min_p:
-                p2h_norm = [(s - min_p) / (max_p - min_p) for s in p2h_scores]
+                dict_norm = [(s - min_p) / (max_p - min_p) for s in dict_scores]
             else:
-                p2h_norm = [0.5] * len(p2h_scores)
+                dict_norm = [0.5] * len(dict_scores)
             
             final_scores = [
                 alpha * p + (1 - alpha) * s
-                for p, s in zip(p2h_norm, slm_scores_norm)
+                for p, s in zip(dict_norm, slm_scores_norm)
             ]
         else:
             final_scores = slm_scores_norm
