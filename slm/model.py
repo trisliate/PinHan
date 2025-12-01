@@ -253,13 +253,19 @@ class SLMVocab:
     def __init__(self):
         self.char2id = {'<pad>': 0, '<bos>': 1, '<eos>': 2, '<unk>': 3}
         self.id2char = {0: '<pad>', 1: '<bos>', 2: '<eos>', 3: '<unk>'}
+        
+        # 特殊 token ID
+        self.pad_id = 0
+        self.bos_id = 1
+        self.eos_id = 2
+        self.unk_id = 3
     
-    def build_from_freq(self, char_freq: dict, max_vocab: int = 8000):
+    def build_from_freq(self, char_freq: dict, max_vocab: int = 8000, min_freq: float = 0.0):
         """从频率字典构建词表"""
         sorted_chars = sorted(char_freq.items(), key=lambda x: x[1], reverse=True)
         
         for char, freq in sorted_chars[:max_vocab - 4]:
-            if char not in self.char2id:
+            if freq >= min_freq and char not in self.char2id:
                 idx = len(self.char2id)
                 self.char2id[char] = idx
                 self.id2char[idx] = char
@@ -295,7 +301,13 @@ class SLMVocab:
         with open(path, 'rb') as f:
             data = orjson.loads(f.read())
         self.char2id = data['char2id']
-        self.id2char = {v: k for k, v in self.char2id.items()}
+        self.id2char = {int(v): k for k, v in self.char2id.items()}
+        
+        # 重新设置特殊 token ID
+        self.pad_id = self.char2id.get('<pad>', 0)
+        self.bos_id = self.char2id.get('<bos>', 1)
+        self.eos_id = self.char2id.get('<eos>', 2)
+        self.unk_id = self.char2id.get('<unk>', 3)
 
 
 class CandidateReranker:

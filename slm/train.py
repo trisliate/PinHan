@@ -1,14 +1,13 @@
 """
-P2H 模型训练脚本
+SLM (Semantic Language Model) 训练脚本
 
-使用从维基百科提取的训练数据训练 P2H 模型
+训练语言模型用于候选重排序
 """
 
 import os
 import sys
 import argparse
 import time
-from datetime import datetime
 from typing import List, Tuple
 
 import torch
@@ -22,23 +21,21 @@ import orjson
 # 添加项目根目录
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from p2h.model import P2HModel, P2HConfig, P2HVocab
+from slm.model import SLModel, SLMConfig, SLMVocab
 
 
-class P2HDataset(Dataset):
-    """P2H 训练数据集"""
+class SLMDataset(Dataset):
+    """SLM 训练数据集 - 语言模型训练"""
     
     def __init__(
         self, 
         data_path: str, 
-        vocab: P2HVocab,
-        max_pinyin_len: int = 64,
-        max_hanzi_len: int = 64,
+        vocab: SLMVocab,
+        max_len: int = 128,
         max_samples: int = None,
     ):
         self.vocab = vocab
-        self.max_pinyin_len = max_pinyin_len
-        self.max_hanzi_len = max_hanzi_len
+        self.max_len = max_len
         
         self.samples = []
         
@@ -49,55 +46,41 @@ class P2HDataset(Dataset):
                     break
                 record = orjson.loads(line)
                 
-                # 拼音列表
-                pinyins = record['pinyin'].split()
                 hanzi = record['hanzi']
                 
                 # 长度过滤
-                if len(pinyins) > max_pinyin_len - 2 or len(hanzi) > max_hanzi_len - 2:
+                if len(hanzi) < 2 or len(hanzi) > max_len - 2:
                     continue
                 
-                self.samples.append((pinyins, hanzi))
+                self.samples.append(hanzi)
         
         print(f"加载完成: {len(self.samples)} 条样本")
     
     def __len__(self):
         return len(self.samples)
     
-    def __getitem__(self, idx) -> Tuple[List[int], List[int]]:
-        pinyins, hanzi = self.samples[idx]
+    def __getitem__(self, idx) -> List[int]:
+        hanzi = self.samples[idx]
         
-        # 编码
-        pinyin_ids = self.vocab.encode_pinyin(pinyins)
-        hanzi_ids = [1] + self.vocab.encode_hanzi(hanzi) + [2]  # BOS + text + EOS
+        # 编码: BOS + text + EOS
+        ids = [self.vocab.bos_id] + self.vocab.encode(hanzi) + [self.vocab.eos_id]
         
-        return pinyin_ids, hanzi_ids
+        return ids
 
 
-def collate_fn(batch: List[Tuple[List[int], List[int]]]) -> Tuple[torch.Tensor, torch.Tensor]:
+def collate_fn(batch: List[List[int]]) -> torch.Tensor:
     """批处理函数：padding"""
-    pinyin_batch, hanzi_batch = zip(*batch)
+    max_len = max(len(seq) for seq in batch)
     
-    # 计算最大长度
-    max_pinyin = max(len(p) for p in pinyin_batch)
-    max_hanzi = max(len(h) for h in hanzi_batch)
+    padded = []
+    for seq in batch:
+        padded.append(seq + [0] * (max_len - len(seq)))
     
-    # Padding
-    pinyin_padded = []
-    hanzi_padded = []
-    
-    for p, h in zip(pinyin_batch, hanzi_batch):
-        pinyin_padded.append(p + [0] * (max_pinyin - len(p)))
-        hanzi_padded.append(h + [0] * (max_hanzi - len(h)))
-    
-    return (
-        torch.tensor(pinyin_padded, dtype=torch.long),
-        torch.tensor(hanzi_padded, dtype=torch.long),
-    )
+    return torch.tensor(padded, dtype=torch.long)
 
 
 def train_epoch(
-    model: P2HModel,
+    model: SLModel,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
@@ -108,76 +91,84 @@ def train_epoch(
     """训练一个 epoch"""
     model.train()
     total_loss = 0.0
+    total_tokens = 0
     start_time = time.time()
     
-    for batch_idx, (pinyin_ids, hanzi_ids) in enumerate(dataloader):
-        pinyin_ids = pinyin_ids.to(device)
-        hanzi_ids = hanzi_ids.to(device)
+    for batch_idx, input_ids in enumerate(dataloader):
+        input_ids = input_ids.to(device)
         
-        # 输入是 hanzi_ids[:-1]，目标是 hanzi_ids[1:]
-        tgt_input = hanzi_ids[:, :-1]
-        tgt_output = hanzi_ids[:, 1:]
+        # 语言模型: 输入是 x[:-1]，目标是 x[1:]
+        x = input_ids[:, :-1]
+        y = input_ids[:, 1:]
         
         optimizer.zero_grad()
         
-        logits = model(pinyin_ids, tgt_input)
+        logits = model(x)
         
-        # 计算损失
+        # 计算损失 (忽略 padding)
         loss = criterion(
             logits.reshape(-1, logits.size(-1)),
-            tgt_output.reshape(-1)
+            y.reshape(-1)
         )
         
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         
-        total_loss += loss.item()
+        # 统计非 padding token 数量
+        non_pad = (y != 0).sum().item()
+        total_loss += loss.item() * non_pad
+        total_tokens += non_pad
         
         if (batch_idx + 1) % log_interval == 0:
             elapsed = time.time() - start_time
-            cur_loss = total_loss / (batch_idx + 1)
+            cur_loss = total_loss / total_tokens
+            ppl = torch.exp(torch.tensor(cur_loss)).item()
             print(f"  Epoch {epoch} | Batch {batch_idx+1}/{len(dataloader)} | "
-                  f"Loss: {cur_loss:.4f} | Time: {elapsed:.1f}s")
+                  f"Loss: {cur_loss:.4f} | PPL: {ppl:.2f} | Time: {elapsed:.1f}s")
     
-    return total_loss / len(dataloader)
+    return total_loss / total_tokens
 
 
 def evaluate(
-    model: P2HModel,
+    model: SLModel,
     dataloader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
-) -> float:
-    """评估模型"""
+) -> Tuple[float, float]:
+    """评估模型，返回 (loss, perplexity)"""
     model.eval()
     total_loss = 0.0
+    total_tokens = 0
     
     with torch.no_grad():
-        for pinyin_ids, hanzi_ids in dataloader:
-            pinyin_ids = pinyin_ids.to(device)
-            hanzi_ids = hanzi_ids.to(device)
+        for input_ids in dataloader:
+            input_ids = input_ids.to(device)
             
-            tgt_input = hanzi_ids[:, :-1]
-            tgt_output = hanzi_ids[:, 1:]
+            x = input_ids[:, :-1]
+            y = input_ids[:, 1:]
             
-            logits = model(pinyin_ids, tgt_input)
+            logits = model(x)
             loss = criterion(
                 logits.reshape(-1, logits.size(-1)),
-                tgt_output.reshape(-1)
+                y.reshape(-1)
             )
             
-            total_loss += loss.item()
+            non_pad = (y != 0).sum().item()
+            total_loss += loss.item() * non_pad
+            total_tokens += non_pad
     
-    return total_loss / len(dataloader)
+    avg_loss = total_loss / total_tokens
+    ppl = torch.exp(torch.tensor(avg_loss)).item()
+    
+    return avg_loss, ppl
 
 
 def main():
-    parser = argparse.ArgumentParser(description='训练 P2H 模型')
+    parser = argparse.ArgumentParser(description='训练 SLM 模型')
     parser.add_argument('--data', type=str, default='data/train_data.jsonl')
-    parser.add_argument('--dict', type=str, default='dicts/char_dict.json')
     parser.add_argument('--freq', type=str, default='dicts/char_freq.json')
-    parser.add_argument('--output', type=str, default='checkpoints/p2h')
+    parser.add_argument('--output', type=str, default='checkpoints/slm')
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -192,7 +183,6 @@ def main():
     
     project_root = os.path.dirname(os.path.dirname(__file__))
     data_path = os.path.join(project_root, args.data)
-    dict_path = os.path.join(project_root, args.dict)
     freq_path = os.path.join(project_root, args.freq)
     output_dir = os.path.join(project_root, args.output)
     
@@ -201,7 +191,7 @@ def main():
     # 日志目录
     log_dir = os.path.join(project_root, 'logs')
     os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f'p2h_train_{time.strftime("%Y%m%d_%H%M%S")}.log')
+    log_file = os.path.join(log_dir, f'slm_train_{time.strftime("%Y%m%d_%H%M%S")}.log')
     
     # 设备
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -212,24 +202,20 @@ def main():
     
     # 构建词表
     print("\n[Step 1] 构建词表...")
-    vocab = P2HVocab()
-    
-    with open(dict_path, 'rb') as f:
-        char_dict = orjson.loads(f.read())
+    vocab = SLMVocab()
     
     with open(freq_path, 'rb') as f:
         char_freq = orjson.loads(f.read())
     
-    vocab.build_from_dict(char_dict, char_freq)
-    print(f"  拼音词表: {vocab.pinyin_vocab_size}")
-    print(f"  汉字词表: {vocab.hanzi_vocab_size}")
+    vocab.build_from_freq(char_freq, min_freq=0.0)
+    print(f"  词表大小: {vocab.vocab_size}")
     
     # 保存词表
-    vocab.save(os.path.join(output_dir, 'vocab.json'))
+    vocab.save(os.path.join(output_dir, 'slm_vocab.json'))
     
     # 加载数据
     print("\n[Step 2] 加载数据...")
-    dataset = P2HDataset(data_path, vocab, max_samples=args.max_samples)
+    dataset = SLMDataset(data_path, vocab, max_samples=args.max_samples)
     
     # 划分训练/验证集
     val_size = int(len(dataset) * args.val_split)
@@ -262,11 +248,8 @@ def main():
     
     # 创建模型
     print("\n[Step 3] 创建模型...")
-    config = P2HConfig(
-        pinyin_vocab_size=vocab.pinyin_vocab_size,
-        hanzi_vocab_size=vocab.hanzi_vocab_size,
-    )
-    model = P2HModel(config).to(device)
+    config = SLMConfig(vocab_size=vocab.vocab_size)
+    model = SLModel(config).to(device)
     
     num_params = sum(p.numel() for p in model.parameters())
     print(f"  参数量: {num_params:,}")
@@ -298,20 +281,23 @@ def main():
         )
         
         # 验证
-        val_loss = evaluate(model, val_loader, criterion, device)
+        val_loss, val_ppl = evaluate(model, val_loader, criterion, device)
         
         # 更新学习率
         scheduler.step()
         
         epoch_time = time.time() - epoch_start
-        print(f"\nEpoch {epoch} | Train Loss: {train_loss:.4f} | "
-              f"Val Loss: {val_loss:.4f} | Time: {epoch_time:.1f}s")
+        train_ppl = torch.exp(torch.tensor(train_loss)).item()
+        print(f"\nEpoch {epoch} | Train Loss: {train_loss:.4f} (PPL: {train_ppl:.2f}) | "
+              f"Val Loss: {val_loss:.4f} (PPL: {val_ppl:.2f}) | Time: {epoch_time:.1f}s")
         
         # 记录历史
         train_history.append({
             'epoch': epoch,
             'train_loss': train_loss,
+            'train_ppl': train_ppl,
             'val_loss': val_loss,
+            'val_ppl': val_ppl,
             'lr': scheduler.get_last_lr()[0],
             'time': epoch_time,
         })
@@ -326,8 +312,9 @@ def main():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'config': config,
                 'val_loss': val_loss,
-            }, os.path.join(output_dir, 'best_model.pt'))
-            print(f"  ✓ 保存最佳模型 (val_loss={val_loss:.4f})")
+                'val_ppl': val_ppl,
+            }, os.path.join(output_dir, 'slm_best.pt'))
+            print(f"  ✓ 保存最佳模型 (val_loss={val_loss:.4f}, ppl={val_ppl:.2f})")
         else:
             patience_counter += 1
             print(f"  验证损失未改善 ({patience_counter}/{args.patience})")
@@ -340,7 +327,8 @@ def main():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'config': config,
                 'val_loss': val_loss,
-            }, os.path.join(output_dir, f'checkpoint_epoch{epoch}.pt'))
+                'val_ppl': val_ppl,
+            }, os.path.join(output_dir, f'slm_checkpoint_epoch{epoch}.pt'))
             print(f"  保存检查点 epoch {epoch}")
         
         # Early stopping
@@ -355,16 +343,17 @@ def main():
         'optimizer_state_dict': optimizer.state_dict(),
         'config': config,
         'val_loss': val_loss,
-    }, os.path.join(output_dir, 'last_model.pt'))
+        'val_ppl': val_ppl,
+    }, os.path.join(output_dir, 'slm_last.pt'))
     
     # 保存训练日志
-    import orjson
     log_data = {
         'args': vars(args),
         'model_params': num_params,
         'train_size': train_size,
         'val_size': val_size,
         'best_val_loss': best_val_loss,
+        'best_ppl': torch.exp(torch.tensor(best_val_loss)).item(),
         'history': train_history,
     }
     with open(log_file, 'wb') as f:
@@ -373,6 +362,7 @@ def main():
     print("\n" + "=" * 60)
     print("训练完成!")
     print(f"最佳验证损失: {best_val_loss:.4f}")
+    print(f"最佳困惑度: {torch.exp(torch.tensor(best_val_loss)).item():.2f}")
     print(f"模型保存至: {output_dir}")
     print(f"训练日志: {log_file}")
 

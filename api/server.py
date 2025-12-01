@@ -2,14 +2,15 @@
 IME-SLM FastAPI 服务
 
 提供 RESTful API 接口
+支持 v1/v2 引擎切换
 """
 
 import os
 import sys
-from typing import List, Optional
+from typing import List, Optional, Union
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from engine import IMEEngine, create_engine
+from engine_v2 import IMEEngineV2, create_engine_v2
 from config import EngineConfig
 
 
@@ -42,6 +44,17 @@ class IMEResponse(BaseModel):
     corrected_pinyin: str = Field(..., description="纠正后的拼音")
     segmented_pinyin: List[str] = Field(..., description="切分后的拼音")
     candidates: List[CandidateItem] = Field(..., description="候选列表")
+    metadata: Optional[dict] = Field(None, description="元数据（v2引擎）")
+
+
+class StatsResponse(BaseModel):
+    """统计信息响应"""
+    total_requests: int
+    level1_rate: float
+    level2_rate: float
+    level3_rate: float
+    avg_time_ms: float
+    cache_hit_rate: float
 
 
 class HealthResponse(BaseModel):
@@ -52,7 +65,8 @@ class HealthResponse(BaseModel):
 
 
 # ===== 全局引擎实例 =====
-engine: Optional[IMEEngine] = None
+engine: Optional[Union[IMEEngine, IMEEngineV2]] = None
+USE_V2_ENGINE = True  # 使用 v2 引擎
 
 
 @asynccontextmanager
@@ -70,8 +84,12 @@ async def lifespan(app: FastAPI):
         enable_slm_rerank=True,
     )
     
-    engine = create_engine(config, model_dir=project_root)
-    print("IME 引擎初始化完成")
+    if USE_V2_ENGINE:
+        engine = create_engine_v2(config, model_dir=project_root)
+        print("IME 引擎 v2 (分层策略) 初始化完成")
+    else:
+        engine = create_engine(config, model_dir=project_root)
+        print("IME 引擎 v1 初始化完成")
     
     yield
     
@@ -152,6 +170,7 @@ async def process_pinyin(request: IMERequest):
                 CandidateItem(text=c.text, score=c.score, source=c.source)
                 for c in result.candidates
             ],
+            metadata=getattr(result, 'metadata', None),
         )
     finally:
         engine.config.top_k = original_top_k
@@ -225,6 +244,21 @@ async def query_word(pinyin: str, limit: int = 10):
             for w in words[:limit]
         ],
     }
+
+
+@app.get("/stats", response_model=StatsResponse, tags=["系统"])
+async def get_stats():
+    """获取引擎统计信息（仅 v2 引擎）"""
+    global engine
+    
+    if engine is None:
+        raise HTTPException(status_code=503, detail="引擎未就绪")
+    
+    if not hasattr(engine, 'get_stats'):
+        raise HTTPException(status_code=400, detail="v1 引擎不支持统计信息")
+    
+    stats = engine.get_stats()
+    return StatsResponse(**stats)
 
 
 # ===== 启动入口 =====

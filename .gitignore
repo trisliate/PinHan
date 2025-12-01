@@ -34,6 +34,13 @@ htmlcov/
 outputs/
 data/
 
+# Model checkpoints (too large for git)
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.bin
+
 # Large dataset (Wiki dump) - too large for git
 zhwiki-latest-pages-articles.xml
 

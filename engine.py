@@ -5,10 +5,15 @@ IME-SLM 引擎主入口
 """
 
 import os
+import logging
 from typing import List, Optional
 import torch
 
 from config import EngineConfig, EngineOutput, CandidateResult, DEFAULT_CONFIG
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class IMEEngine:
@@ -50,8 +55,8 @@ class IMEEngine:
         self.segmenter = create_segmenter_from_dict(char_dict_path)
         
         # P2H 模型（如果存在检查点）
-        p2h_checkpoint = os.path.join(self.model_dir, 'checkpoints', 'best_model.pt')
-        p2h_vocab_path = os.path.join(self.model_dir, 'checkpoints', 'vocab.json')
+        p2h_checkpoint = os.path.join(self.model_dir, 'checkpoints', 'p2h', 'best_model.pt')
+        p2h_vocab_path = os.path.join(self.model_dir, 'checkpoints', 'p2h', 'vocab.json')
         
         if os.path.exists(p2h_checkpoint) and os.path.exists(p2h_vocab_path):
             from p2h import P2HModel, P2HVocab
@@ -65,10 +70,14 @@ class IMEEngine:
             self.p2h_model = P2HModel(checkpoint['config']).to(self.device)
             self.p2h_model.load_state_dict(checkpoint['model_state_dict'])
             self.p2h_model.eval()
+            logger.info("✓ P2H 模型加载成功")
+        else:
+            logger.warning("⚠ P2H 模型未找到，将使用词典回退")
+            logger.warning(f"  检查点路径: {p2h_checkpoint}")
         
         # SLM 模型（如果存在检查点）
-        slm_checkpoint = os.path.join(self.model_dir, 'checkpoints', 'slm_best.pt')
-        slm_vocab_path = os.path.join(self.model_dir, 'checkpoints', 'slm_vocab.json')
+        slm_checkpoint = os.path.join(self.model_dir, 'checkpoints', 'slm', 'slm_best.pt')
+        slm_vocab_path = os.path.join(self.model_dir, 'checkpoints', 'slm', 'slm_vocab.json')
         
         if os.path.exists(slm_checkpoint) and os.path.exists(slm_vocab_path):
             from slm import SLModel, SLMVocab, CandidateReranker
@@ -85,7 +94,26 @@ class IMEEngine:
             
             # 重排序器
             self.reranker = CandidateReranker(self.slm_model, self.slm_vocab, self.device)
+            logger.info("✓ SLM 模型加载成功")
+        else:
+            logger.warning("⚠ SLM 模型未找到，将禁用语义重排")
+            logger.warning(f"  检查点路径: {slm_checkpoint}")
+        
+        # 输出模块状态汇总
+        self._log_module_status()
     
+    def _log_module_status(self):
+        """输出模块加载状态汇总"""
+        logger.info("=" * 50)
+        logger.info("IME-SLM 引擎模块状态:")
+        logger.info(f"  词典服务: {'✓ 已加载' if self.dict_service else '✗ 未加载'}")
+        logger.info(f"  拼音纠错: {'✓ 已加载' if self.corrector else '✗ 未加载'}")
+        logger.info(f"  拼音切分: {'✓ 已加载' if self.segmenter else '✗ 未加载'}")
+        logger.info(f"  P2H 模型: {'✓ 已加载' if self.p2h_model else '✗ 未加载 (使用词典回退)'}")
+        logger.info(f"  SLM 模型: {'✓ 已加载' if self.slm_model else '✗ 未加载 (禁用重排)'}")
+        logger.info(f"  设备: {self.device}")
+        logger.info("=" * 50)
+
     def process(self, pinyin: str, context: str = "") -> EngineOutput:
         """
         主处理流程
@@ -99,15 +127,28 @@ class IMEEngine:
         """
         output = EngineOutput(raw_pinyin=pinyin)
         
-        # Step 1: 拼音切分（如果没有空格分隔）
-        if ' ' not in pinyin:
+        # Step 1: 拼音切分
+        segments = []
+        if ' ' in pinyin:
+            # 有空格分隔，对每个部分分别切分
+            parts = pinyin.split()
+            for part in parts:
+                if part in self.segmenter.valid_pinyins:
+                    segments.append(part)
+                else:
+                    # 尝试切分
+                    result = self.segmenter.segment_best(part)
+                    if result:
+                        segments.extend(result.segments)
+                    else:
+                        segments.append(part)
+        else:
+            # 无空格，整体切分
             segment_result = self.segmenter.segment_best(pinyin)
             if segment_result:
                 segments = segment_result.segments
             else:
                 segments = [pinyin]
-        else:
-            segments = pinyin.split()
         
         # Step 2: 拼音纠错
         corrected_segments = []
@@ -218,35 +259,108 @@ class IMEEngine:
                     source="dict_word"
                 ))
         else:
-            # 多音节：组合查询
-            # 尝试整体作为词查询
+            # 多音节查询
+            # 1. 尝试整体作为词查询
             words = self.dict_service.get_words(segments)
             for word in words[:5]:
                 freq = self.dict_service.get_word_freq(word)
                 candidates.append(CandidateResult(
                     text=word,
-                    score=freq + 0.2,
+                    score=freq + 0.5,  # 完整词组优先
                     source="dict_word"
                 ))
             
-            # 逐字查询组合
-            if len(segments) <= 6:  # 限制长度避免组合爆炸
-                char_options = []
-                for seg in segments:
-                    chars = self.dict_service.get_chars(seg)
-                    if chars:
-                        char_options.append(chars[:3])
-                    else:
-                        char_options.append(['?'])
+            # 2. 尝试分段词组匹配（如 "jin tian" + "tian qi" + ...）
+            candidates.extend(self._segment_word_lookup(segments))
+            
+            # 3. 逐字查询组合（生成多个候选）
+            if len(segments) <= 8:  # 限制长度避免组合爆炸
+                candidates.extend(self._char_combination_lookup(segments))
+        
+        return candidates
+    
+    def _segment_word_lookup(self, segments: List[str]) -> List[CandidateResult]:
+        """分段词组匹配：尝试将拼音序列分成词组"""
+        candidates = []
+        n = len(segments)
+        
+        # 使用动态规划找最佳分词
+        # dp[i] = [(text, score), ...] 表示 segments[:i] 的最佳组合
+        dp = [[] for _ in range(n + 1)]
+        dp[0] = [("", 1.0)]
+        
+        for i in range(1, n + 1):
+            for j in range(max(0, i - 4), i):  # 最长4字词
+                sub_segments = segments[j:i]
                 
-                # 简单组合（只取第一个）
-                if char_options:
-                    first_combo = ''.join([opts[0] for opts in char_options])
-                    candidates.append(CandidateResult(
-                        text=first_combo,
-                        score=0.5,
-                        source="dict_combo"
-                    ))
+                # 尝试作为词查询
+                words = self.dict_service.get_words(sub_segments)
+                if words:
+                    word = words[0]
+                    freq = self.dict_service.get_word_freq(word) + 0.3
+                    for prev_text, prev_score in dp[j][:3]:
+                        dp[i].append((prev_text + word, prev_score * freq))
+                
+                # 尝试逐字
+                if len(sub_segments) == 1:
+                    chars = self.dict_service.get_chars(sub_segments[0])
+                    if chars:
+                        char = chars[0]
+                        freq = self.dict_service.get_char_freq(char)
+                        for prev_text, prev_score in dp[j][:3]:
+                            dp[i].append((prev_text + char, prev_score * max(freq, 0.1)))
+            
+            # 保留前几个
+            dp[i].sort(key=lambda x: x[1], reverse=True)
+            dp[i] = dp[i][:5]
+        
+        for text, score in dp[n]:
+            if text:
+                candidates.append(CandidateResult(
+                    text=text,
+                    score=score,
+                    source="dict_segment"
+                ))
+        
+        return candidates
+    
+    def _char_combination_lookup(self, segments: List[str]) -> List[CandidateResult]:
+        """字符组合查询：生成多个候选组合"""
+        candidates = []
+        
+        # 获取每个拼音的候选字（取前3个）
+        char_options = []
+        for seg in segments:
+            chars = self.dict_service.get_chars(seg)
+            if chars:
+                char_options.append(chars[:3])
+            else:
+                char_options.append(['?'])
+        
+        # 生成组合（限制数量）
+        from itertools import product
+        
+        # 限制组合数量
+        max_combinations = 10
+        count = 0
+        
+        for combo in product(*char_options):
+            if count >= max_combinations:
+                break
+            
+            text = ''.join(combo)
+            if '?' not in text:
+                # 计算组合分数
+                score = 0.3
+                for char in combo:
+                    score *= max(self.dict_service.get_char_freq(char), 0.1)
+                
+                candidates.append(CandidateResult(
+                    text=text,
+                    score=score,
+                    source="dict_combo"
+                ))
+                count += 1
         
         return candidates
 
