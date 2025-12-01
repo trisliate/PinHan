@@ -3,12 +3,11 @@ import sys
 import time
 sys.path.insert(0, '.')
 
-from engine_v2 import IMEEngineV2
+from engine import IMEEngineV3
 
 def main():
     print("初始化引擎...")
-    engine = IMEEngineV2()
-    print(f"ONNX 模式: {engine.use_onnx}")
+    engine = IMEEngineV3()
     print()
 
     # 预热
