@@ -353,8 +353,8 @@ class IMEEngineV3:
                         source="char"
                     ))
         
-        # 逐字组合
-        if 1 < len(segments) <= 4:
+        # 逐字组合（支持任意长度）
+        if len(segments) > 1:
             text, score = "", 1.0
             for seg in segments:
                 chars = self.dict_service.get_chars(seg)
