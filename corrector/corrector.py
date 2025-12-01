@@ -113,23 +113,25 @@ class PinyinCorrector:
         """
         candidates = []
         
-        # 1. 如果已经是有效拼音，直接返回
+        # 1. 如果已经是有效拼音，作为首选候选
         if pinyin in self.valid_pinyins:
             candidates.append(CorrectionCandidate(
                 pinyin=pinyin,
                 score=1.0,
                 reason="exact"
             ))
-            return candidates
+            # 注意：不直接返回，继续查找模糊音，以便支持 "sheng" -> "shen" 这种场景
         
         # 2. 模糊音纠错
         if pinyin in self.fuzzy_map:
             for correct_py, score in self.fuzzy_map[pinyin]:
-                candidates.append(CorrectionCandidate(
-                    pinyin=correct_py,
-                    score=score,
-                    reason="fuzzy"
-                ))
+                # 避免重复添加自己
+                if correct_py != pinyin:
+                    candidates.append(CorrectionCandidate(
+                        pinyin=correct_py,
+                        score=score,
+                        reason="fuzzy"
+                    ))
         
         # 3. 编辑距离纠错（距离1）
         for valid_py in self.valid_pinyins:

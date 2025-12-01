@@ -208,6 +208,7 @@ class SLModel(nn.Module):
         sentences: List[str],
         vocab: 'SLMVocab',
         device: torch.device = None,
+        context: str = "",
     ) -> List[float]:
         """
         评分句子列表
@@ -216,6 +217,7 @@ class SLModel(nn.Module):
             sentences: 句子列表
             vocab: 词表
             device: 设备
+            context: 上下文文本
         
         Returns:
             scores: 分数列表（负困惑度，越高越好）
@@ -223,11 +225,15 @@ class SLModel(nn.Module):
         self.eval()
         device = device or next(self.parameters()).device
         
+        # 编码上下文
+        context_ids = vocab.encode(context) if context else []
+        
         # 编码
         encoded = []
         max_len = 0
         for sent in sentences:
-            ids = [self.config.bos_id] + vocab.encode(sent) + [self.config.eos_id]
+            # [BOS] + context + sent + [EOS]
+            ids = [self.config.bos_id] + context_ids + vocab.encode(sent) + [self.config.eos_id]
             encoded.append(ids)
             max_len = max(max_len, len(ids))
         
@@ -325,6 +331,7 @@ class CandidateReranker:
         candidates: List[str],
         p2h_scores: List[float] = None,
         alpha: float = 0.7,
+        context: str = "",
     ) -> List[Tuple[str, float]]:
         """
         重排序候选
@@ -333,6 +340,7 @@ class CandidateReranker:
             candidates: 候选句子列表
             p2h_scores: P2H 模型给出的分数（可选）
             alpha: P2H 分数权重（1-alpha 为 SLM 权重）
+            context: 上下文文本
         
         Returns:
             重排序后的 (句子, 综合分数) 列表
@@ -341,7 +349,7 @@ class CandidateReranker:
             return []
         
         # 计算 SLM 分数
-        slm_scores = self.slm.score_sentences(candidates, self.vocab, self.device)
+        slm_scores = self.slm.score_sentences(candidates, self.vocab, self.device, context=context)
         
         # 归一化 SLM 分数到 0-1
         min_s, max_s = min(slm_scores), max(slm_scores)

@@ -41,6 +41,9 @@ checkpoints/
 *.ckpt
 *.bin
 
+# ONNX models (large files)
+models/onnx/*.onnx
+
 # Large dataset (Wiki dump) - too large for git
 zhwiki-latest-pages-articles.xml
 
