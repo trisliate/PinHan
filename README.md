@@ -1,90 +1,63 @@
-# PinHan - 拼音→汉字转换模型
+# PinHan - 拼音到汉字转换
 
-基于 PyTorch Seq2Seq Transformer 的拼音到汉字转换。
+基于词典匹配 + 神经网络的高精度拼音输入法引擎。
 
 ## 快速开始
 
-### 1️⃣ 环境准备
+### 1. 安装依赖
 
 ```bash
-.\.venv\Scripts\Activate.ps1        # Windows 激活虚拟环境
-pip install -r requirements.txt      # 安装依赖
+pip install -r requirements.txt
 ```
 
-### 2️⃣ 数据处理
-
-从 `wiki_latest.jsonl` (6GB) 提取数据：
+### 2. 构建字典
 
 ```bash
-# 7k 样本（快速）
-python preprocess/sample_data.py -i data/wiki_latest.jsonl -o data/wiki_7k.jsonl -c 7000
-
-# 50k 样本（推荐）
-python preprocess/sample_data.py -i data/wiki_latest.jsonl -o data/wiki_50k.jsonl -c 50000 --random
+python preprocess/build_dict.py
 ```
 
-### 3️⃣ 训练模型
+这会从 CC-CEDICT 下载并构建：
+- `word_dict.json` - 词语字典（103,031 条）
+- `char_dict.json` - 单字字典（1,734 个拼音）
+- `char_freq.json` - 字频表（20,992 字）
+
+### 3. 测试转换
 
 ```bash
-# 基础训练 (7k 数据)
-python model/train.py --data data/wiki_7k.jsonl --epochs 50
-
-# 推荐配置 (50k 数据)
-python model/train.py --data data/wiki_50k.jsonl --epochs 100 --batch-size 32
+python -m model.infer --pinyin "ni3 hao3, jin1 tian1 tian1 qi4 hen3 hao3!"
 ```
 
-### 4️⃣ 推理
-
-```bash
-python model/infer.py --model outputs/best_model.pt --pinyin "zhong1 guo2"
+输出：
+```
+你好,今天天气很好!
 ```
 
 ---
 
-## 脚本用法
+## 使用方法
 
-### sample_data.py - 数据提取
-
-从大文件快速提取样本。
+### 推理
 
 ```bash
-python preprocess/sample_data.py \
-  -i data/wiki_latest.jsonl \        # 输入文件
-  -o data/wiki_50k.jsonl \           # 输出文件
-  -c 50000 \                         # 样本数
-  --random                            # 随机采样
+# 基本用法
+python -m model.infer -p "wo3 ai4 zhong1 guo2"
+# 输出: 我爱中国
+
+# 带标点
+python -m model.infer -p "ni3 hao3 ma5?"
+# 输出: 你好么?
+
+# 完整句子
+python -m model.infer -p "jin1 tian1 wo3 men5 yi1 qi3 chu1 qu4 wan2"
+# 输出: 今天我们一起出去完
 ```
 
-**常用参数：**
-- `--random` : 随机采样（推荐大文件）
-- `--stratified` : 分层采样（优先高频汉字）
-- `-c` : 样本数量
+### 提取语料（可选）
 
-### train.py - 模型训练
+如果你有维基百科 XML 文件：
 
 ```bash
-python model/train.py \
-  --data data/wiki_50k.jsonl \       # 训练数据
-  --epochs 100 \                     # 训练轮数
-  --batch-size 32 \                  # 批次大小
-  --learning-rate 0.001              # 学习率
-```
-
-**Epochs 建议：**
-| 数据量 | Epochs | 准确率 |
-|--------|--------|--------|
-| 7k | 40-60 | 20-30% |
-| 50k | 80-150 | 60-70% ⭐ |
-| 100k | 100-200 | 75-85% |
-
-### infer.py - 推理
-
-```bash
-# 贪心解码
-python model/infer.py --model outputs/best_model.pt --pinyin "zhong1 guo2"
-
-# 束搜索（质量更好）
-python model/infer.py --model outputs/best_model.pt --pinyin "zhong1 guo2" --beam-size 3
+python preprocess/extract_corpus.py -i data/zhwiki.xml -o data/corpus.jsonl --max 100000
 ```
 
 ---
@@ -93,113 +66,77 @@ python model/infer.py --model outputs/best_model.pt --pinyin "zhong1 guo2" --bea
 
 ```
 PinHan/
-├── model/                   # 模型代码
-│   ├── train.py            # 训练
-│   ├── infer.py            # 推理
-│   └── core/               # 核心模块
-├── preprocess/             # 数据处理
-│   └── sample_data.py      # 数据提取 ⭐
-├── data/                   # 数据集
-│   ├── wiki_latest.jsonl   # 完整数据 (6GB)
-│   ├── wiki_7k.jsonl       # 7k 样本
-│   └── wiki_50k.jsonl      # 50k 样本
-├── outputs/                # 模型输出
-└── tests/                  # 单元测试 (32 个)
+├── model/
+│   ├── infer.py              # 推理脚本
+│   └── core/
+│       └── pinyin_dict.py    # 字典类
+├── preprocess/
+│   ├── build_dict.py         # 构建字典（CC-CEDICT）
+│   └── extract_corpus.py     # 提取语料（维基百科）
+├── dicts/
+│   ├── word_dict.json        # 词语字典
+│   ├── char_dict.json        # 单字字典
+│   └── char_freq.json        # 字频表
+├── tests/
+│   └── test_dict.py          # 测试
+└── requirements.txt
 ```
 
 ---
 
-## 数据格式
+## 技术架构
 
-JSONL 格式，每行一个对象：
+### 三层解码策略
 
-```json
-{"pinyin": "ni3 hao3", "hanzi": "你好"}
-{"pinyin": "zhong1 guo2", "hanzi": "中国"}
+```
+输入: ni3 hao3 ma5
+      ↓
+[第1层] 词语匹配: "ni3 hao3" → "你好"
+      ↓
+[第2层] 单字回退: "ma5" → 轻声回退 → "么"
+      ↓
+[第3层] 神经网络: (待实现) 上下文消歧
+      ↓
+输出: 你好么
 ```
 
-注意：拼音包含声调数字 (1,2,3,4) 或 0 表示轻声。
+### 字典来源
 
----
+| 字典 | 来源 | 数量 |
+|------|------|------|
+| 词语 | CC-CEDICT | 103,031 条 |
+| 单字 | CC-CEDICT + 字频排序 | 1,734 拼音 |
+| 字频 | 现代汉语常用字表 | 20,992 字 |
 
-## 训练指南
+### 特性
 
-### 选择数据量和 Epochs
-
-目标：参数/样本比 = 10-50:1
-
-模型参数：5.4M
-
-**推荐配置：**
-
-| 数据量 | 参数比 | Epochs | 准确率 | CPU | GPU |
-|--------|--------|--------|--------|------|------|
-| 7k | 771:1 | 40-60 | 20% | 30min | 1min |
-| 50k | 108:1 | 80-150 | 70% | 300min | 15min |
-| 100k | 54:1 | 100-200 | 85% | 600min | 30min |
-
-**建议：50k 数据 + 100 epochs 最高效** ⭐
-
-### 监控训练
-
-输出位置：`outputs/validation_model/`
-- `best_model.pt` - 最佳模型
-- `logs/training_summary.json` - 训练指标
-
----
-
-## 常见问题
-
-### 如何生成数据？
-
-```bash
-python preprocess/sample_data.py -i data/wiki_latest.jsonl -o data/wiki_50k.jsonl -c 50000 --random
-```
-
-### 怎样设置 Epochs？
-
-根据数据量：7k → 40-60，50k → 80-150，100k+ → 100-200。
-
-监控验证损失，10-20 个 epochs 不下降时停止。
-
-### 支持 GPU 吗？
-
-是的，自动检测并使用（快 10-50 倍）。
-
-### 如何使用自己的数据？
-
-准备 JSONL 格式：
-```json
-{"pinyin": "...", "hanzi": "..."}
-```
-
-然后训练：
-```bash
-python model/train.py --data your_data.jsonl --epochs 100
-```
-
----
-
-## 模型信息
-
-| 指标 | 值 |
-|-----|-----|
-| 参数 | 5,400,000 |
-| 词表 | ~8,000 |
-| 速度 | 400-600ms (CPU) / 50-100ms (GPU) |
-| 内存 | ~2GB (训练) / 500MB (推理) |
+- ✅ 词语优先匹配（最大正向匹配）
+- ✅ 常用字优先（按字频排序）
+- ✅ 轻声支持（ma5 自动回退到 ma1/ma2/ma3/ma4）
+- ✅ 标点保留
+- 🔄 神经网络消歧（开发中）
 
 ---
 
 ## 测试
 
 ```bash
-pytest tests/ -v                    # 全部测试
-pytest tests/test_units.py -v       # 单元测试
-pytest tests/test_integration.py -v # 集成测试
+python -m pytest tests/ -v
 ```
 
-状态：**32 个测试全部通过** ✅
+---
+
+## 拼音格式
+
+使用数字声调：
+
+| 声调 | 格式 | 示例 |
+|------|------|------|
+| 一声 | 1 | ma1 (妈) |
+| 二声 | 2 | ma2 (麻) |
+| 三声 | 3 | ma3 (马) |
+| 四声 | 4 | ma4 (骂) |
+| 轻声 | 5 | ma5 (么/吗) |
 
 ---
 
