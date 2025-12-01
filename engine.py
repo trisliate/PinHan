@@ -166,47 +166,129 @@ class IMEEngineV3:
         logger.info(f"  设备: {self.device}")
         logger.info("=" * 50)
     
+    # 标点符号集合（中英文）
+    PUNCTUATION = set("，。！？、；：""''（）……——·,.:;!?\"'()-_+=[]{}|\\<>/@#$%^&*~`")
+    
     def process(self, pinyin: str, context: str = "") -> EngineOutput:
         """主处理入口"""
         start = time.perf_counter()
         self.stats['total'] += 1
         
-        pinyin = pinyin.strip().lower()
-        cache_key = f"{pinyin}|{context[-10:]}"
+        raw_input = pinyin.strip()
         
-        # 缓存命中
-        cached = self.cache.get(cache_key)
-        if cached:
-            self.stats['cache_hits'] += 1
+        # 分离拼音和标点符号
+        parts = self._split_pinyin_and_punct(raw_input)
+        
+        # 如果全是标点，直接返回
+        if all(p[0] == 'punct' for p in parts):
+            punct_text = ''.join(p[1] for p in parts)
             elapsed = (time.perf_counter() - start) * 1000
-            return self._build_output(pinyin, cached, elapsed, cached=True)
+            return self._build_output(raw_input, [CandidateResult(punct_text, 1.0, "punct")], elapsed)
         
-        # 分词 + 纠错
-        segments = self._segment(pinyin)
-        corrected = self._correct(segments)
+        # 处理每个拼音片段，收集候选
+        all_candidates = []
+        running_context = context  # 累积上下文
         
-        # 词典召回
-        candidates = self._dict_lookup(corrected)
+        for part_type, part_value in parts:
+            if part_type == 'punct':
+                # 标点直接作为候选的一部分（后续合并）
+                all_candidates.append(('punct', part_value))
+                running_context += part_value  # 标点也加入上下文
+            else:
+                # 拼音片段，走正常流程
+                pinyin_lower = part_value.lower()
+                cache_key = f"{pinyin_lower}|{running_context[-10:]}"
+                
+                cached = self.cache.get(cache_key)
+                if cached:
+                    self.stats['cache_hits'] += 1
+                    all_candidates.append(('pinyin', cached))
+                    # 用首选更新上下文
+                    if cached:
+                        running_context += cached[0].text
+                else:
+                    segments = self._segment(pinyin_lower)
+                    corrected = self._correct(segments)
+                    candidates = self._dict_lookup(corrected)
+                    
+                    use_slm = self.reranker and len(candidates) > 1 and running_context
+                    if use_slm:
+                        self.stats['slm_calls'] += 1
+                        candidates = self._rerank(candidates, running_context)
+                    
+                    self.cache.put(cache_key, candidates)
+                    all_candidates.append(('pinyin', candidates))
+                    # 用首选更新上下文
+                    if candidates:
+                        running_context += candidates[0].text
         
-        # 长输入或有上下文时，使用 SLM 重排序
-        # 无上下文的短/中输入完全依赖词频
-        use_slm = (
-            self.reranker and 
-            len(candidates) > 1 and
-            context  # 只在有上下文时使用 SLM
-        )
-        
-        if use_slm:
-            self.stats['slm_calls'] += 1
-            candidates = self._rerank(candidates, context)
-        
-        # 缓存
-        self.cache.put(cache_key, candidates)
+        # 合并结果：拼音候选 + 标点
+        merged = self._merge_candidates_with_punct(all_candidates)
         
         elapsed = (time.perf_counter() - start) * 1000
         self.stats['total_ms'] += elapsed
         
-        return self._build_output(pinyin, candidates, elapsed, segments=corrected)
+        return self._build_output(raw_input, merged, elapsed)
+    
+    def _split_pinyin_and_punct(self, text: str) -> List[Tuple[str, str]]:
+        """将输入拆分为拼音片段和标点符号"""
+        import re
+        parts = []
+        current = ""
+        current_type = None
+        
+        for char in text:
+            is_punct = char in self.PUNCTUATION
+            char_type = 'punct' if is_punct else 'pinyin'
+            
+            if current_type is None:
+                current_type = char_type
+                current = char
+            elif char_type == current_type:
+                current += char
+            else:
+                if current:
+                    parts.append((current_type, current))
+                current_type = char_type
+                current = char
+        
+        if current:
+            parts.append((current_type, current))
+        
+        return parts
+    
+    def _merge_candidates_with_punct(self, all_candidates: List) -> List[CandidateResult]:
+        """合并拼音候选和标点符号"""
+        if not all_candidates:
+            return []
+        
+        # 找出所有拼音候选的数量（取最少的）
+        pinyin_counts = [len(c[1]) for c in all_candidates if c[0] == 'pinyin' and c[1]]
+        if not pinyin_counts:
+            # 没有拼音候选，只有标点
+            punct_text = ''.join(c[1] for c in all_candidates if c[0] == 'punct')
+            return [CandidateResult(punct_text, 1.0, "punct")]
+        
+        num_candidates = min(pinyin_counts + [self.config.top_k])
+        
+        merged = []
+        for i in range(num_candidates):
+            text = ""
+            score = 1.0
+            for ctype, cvalue in all_candidates:
+                if ctype == 'punct':
+                    text += cvalue
+                else:
+                    if i < len(cvalue):
+                        text += cvalue[i].text
+                        score *= cvalue[i].score
+                    elif cvalue:
+                        text += cvalue[0].text
+                        score *= cvalue[0].score
+            
+            merged.append(CandidateResult(text, score, "merged"))
+        
+        return merged
     
     def _segment(self, pinyin: str) -> List[str]:
         """分词"""

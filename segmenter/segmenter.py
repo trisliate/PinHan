@@ -196,18 +196,18 @@ class PinyinSegmenter:
         # 基础分
         base_score = 0.9
         
+        # 长度偏好：更长的拼音更具体，优先选择
+        # 这样 xue(3) 会优于 xu(2) + e(1)
+        length_bonus = len(pinyin) * 0.05
+        
         # 频率加成
         if self.pinyin_freq:
             freq = self.pinyin_freq.get(pinyin, 0)
             # 归一化
-            freq_score = min(freq / 1000, 0.1)
-            return base_score + freq_score
+            freq_score = min(freq / 1000, 0.05)
+            return base_score + length_bonus + freq_score
         
-        # 长度偏好：适中长度的拼音更常见
-        if 2 <= len(pinyin) <= 4:
-            return base_score + 0.05
-        
-        return base_score
+        return base_score + length_bonus
     
     def is_valid_sequence(self, pinyins: List[str]) -> bool:
         """检查拼音序列是否全部有效"""
