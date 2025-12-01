@@ -1,209 +1,204 @@
-# PinHan - 拼音→汉字转换模型
+# PinHan 拼音输入法引擎
 
-基于 PyTorch Seq2Seq Transformer 的拼音到汉字转换。
+轻量级智能拼音输入法引擎，采用 **词典召回 + SLM 重排序** 架构，专为嵌入式/MCU 设备优化。
+
+## 特性
+
+- **精简架构**: 词典为主，SLM 辅助重排序（仅在有上下文时使用）
+- **低延迟**: 平均 10-15ms，缓存命中 < 1ms
+- **模糊纠错**: 支持常见拼音错误（如 `shengme` → 什么，`zh/z` 模糊音）
+- **上下文感知**: SLM 利用上下文消歧（如 `我做` + `shi` → 事）
+- **标点透传**: 拼音中可直接输入标点（如 `nihao!!haha` → 你好!!哈哈）
+- **轻量模型**: SLM Lite 仅 ~1M 参数，适合嵌入式部署
+
+## 架构说明
+
+```
+用户输入 (nihao) 
+    ↓
+[分词器] nihao → ["ni", "hao"]
+    ↓
+[纠错器] 模糊音扩展 (可选)
+    ↓
+[词典召回] 查 char_dict / word_dict → 候选列表
+    ↓
+[SLM 重排序] (仅当有上下文时) → 最终排序
+    ↓
+返回 Top-K 候选
+```
+
+### 核心模块
+
+| 模块 | 功能 | 文件 |
+|------|------|------|
+| **Engine** | 主引擎，协调各模块 | `engine.py` |
+| **Segmenter** | 拼音切分（动态规划） | `segmenter/segmenter.py` |
+| **Corrector** | 拼音纠错（模糊音+编辑距离） | `corrector/corrector.py` |
+| **DictService** | 词典查询服务 | `dicts/service.py` |
+| **SLM** | 语义语言模型（重排序） | `slm/model.py` |
+
+## 性能指标
+
+| 场景 | 延迟 | 说明 |
+|------|------|------|
+| 缓存命中 | < 1ms | LRU 缓存 2000 条 |
+| 无上下文 | 5-10ms | 纯词典查询 |
+| 有上下文 | 10-20ms | 词典 + SLM 重排 |
+| 段落连续输入 | ~10ms/词 | 实测 Top-1 93.5%, Top-3 100% |
 
 ## 快速开始
 
-### 1️⃣ 环境准备
+### 1. 安装依赖
 
 ```bash
-.\.venv\Scripts\Activate.ps1        # Windows 激活虚拟环境
-pip install -r requirements.txt      # 安装依赖
+pip install -r requirements.txt
 ```
 
-### 2️⃣ 数据处理
-
-从 `wiki_latest.jsonl` (6GB) 提取数据：
+### 2. 构建词典（可选，已预置）
 
 ```bash
-# 7k 样本（快速）
-python preprocess/sample_data.py -i data/wiki_latest.jsonl -o data/wiki_7k.jsonl -c 7000
-
-# 50k 样本（推荐）
-python preprocess/sample_data.py -i data/wiki_latest.jsonl -o data/wiki_50k.jsonl -c 50000 --random
+# 从 CC-CEDICT + jieba 构建词典
+python preprocess/build_dict.py
 ```
 
-### 3️⃣ 训练模型
+### 3. 训练 SLM Lite（可选，已预置）
 
 ```bash
-# 基础训练 (7k 数据)
-python model/train.py --data data/wiki_7k.jsonl --epochs 50
+# 需要先准备训练数据
+python preprocess/build_training_data.py --xml zhwiki-latest-pages-articles.xml --max-samples 50000
 
-# 推荐配置 (50k 数据)
-python model/train.py --data data/wiki_50k.jsonl --epochs 100 --batch-size 32
+# 训练模型
+python slm/train_lite.py --epochs 20 --batch-size 128 --max-samples 50000
 ```
 
-### 4️⃣ 推理
+模型配置: 2 层 Transformer, 128 维, 4 头, 5000 词表, ~1M 参数
+
+### 4. 启动 API 服务
 
 ```bash
-python model/infer.py --model outputs/best_model.pt --pinyin "zhong1 guo2"
+python -m api.server
 ```
 
----
+- API 文档: http://localhost:8000/docs
+- 健康检查: http://localhost:8000/health
 
-## 脚本用法
-
-### sample_data.py - 数据提取
-
-从大文件快速提取样本。
+### 5. 调用示例
 
 ```bash
-python preprocess/sample_data.py \
-  -i data/wiki_latest.jsonl \        # 输入文件
-  -o data/wiki_50k.jsonl \           # 输出文件
-  -c 50000 \                         # 样本数
-  --random                            # 随机采样
+# 简单查询
+curl "http://localhost:8000/ime/simple?pinyin=nihao"
+
+# 带上下文
+curl -X POST http://localhost:8000/ime \
+  -H "Content-Type: application/json" \
+  -d '{"pinyin": "shi", "context": "我做", "top_k": 5}'
 ```
 
-**常用参数：**
-- `--random` : 随机采样（推荐大文件）
-- `--stratified` : 分层采样（优先高频汉字）
-- `-c` : 样本数量
+```python
+# Python 调用
+from engine import create_engine_v3
 
-### train.py - 模型训练
-
-```bash
-python model/train.py \
-  --data data/wiki_50k.jsonl \       # 训练数据
-  --epochs 100 \                     # 训练轮数
-  --batch-size 32 \                  # 批次大小
-  --learning-rate 0.001              # 学习率
+engine = create_engine_v3()
+result = engine.process("nihao", context="")
+print([c.text for c in result.candidates])  # ['你好', '拟好', ...]
 ```
 
-**Epochs 建议：**
-| 数据量 | Epochs | 准确率 |
-|--------|--------|--------|
-| 7k | 40-60 | 20-30% |
-| 50k | 80-150 | 60-70% ⭐ |
-| 100k | 100-200 | 75-85% |
-
-### infer.py - 推理
-
-```bash
-# 贪心解码
-python model/infer.py --model outputs/best_model.pt --pinyin "zhong1 guo2"
-
-# 束搜索（质量更好）
-python model/infer.py --model outputs/best_model.pt --pinyin "zhong1 guo2" --beam-size 3
-```
-
----
-
-## 项目结构
+## 目录结构
 
 ```
 PinHan/
-├── model/                   # 模型代码
-│   ├── train.py            # 训练
-│   ├── infer.py            # 推理
-│   └── core/               # 核心模块
-├── preprocess/             # 数据处理
-│   └── sample_data.py      # 数据提取 ⭐
-├── data/                   # 数据集
-│   ├── wiki_latest.jsonl   # 完整数据 (6GB)
-│   ├── wiki_7k.jsonl       # 7k 样本
-│   └── wiki_50k.jsonl      # 50k 样本
-├── outputs/                # 模型输出
-└── tests/                  # 单元测试 (32 个)
+├── engine.py              # IME 引擎主入口
+├── api/
+│   └── server.py          # FastAPI 服务
+├── corrector/
+│   └── corrector.py       # 拼音纠错（模糊音、编辑距离）
+├── segmenter/
+│   └── segmenter.py       # 拼音切分（DP 最优切分）
+├── slm/
+│   ├── model.py           # SLM 模型定义
+│   └── train_lite.py      # SLM Lite 训练脚本
+├── dicts/
+│   ├── service.py         # 词典服务
+│   ├── char_dict.json     # 单字字典 (拼音→汉字)
+│   ├── word_dict.json     # 词组字典 (拼音序列→词组)
+│   ├── char_freq.json     # 字频表
+│   └── word_freq.json     # 词频表
+├── preprocess/
+│   ├── build_dict.py      # 词典构建脚本
+│   └── build_training_data.py  # 训练数据生成
+├── checkpoints/
+│   └── slm_lite/          # SLM Lite 模型文件
+├── tests/
+│   ├── test_story.py      # 段落输入+标点测试
+│   └── ...
+└── requirements.txt
 ```
-
----
-
-## 数据格式
-
-JSONL 格式，每行一个对象：
-
-```json
-{"pinyin": "ni3 hao3", "hanzi": "你好"}
-{"pinyin": "zhong1 guo2", "hanzi": "中国"}
-```
-
-注意：拼音包含声调数字 (1,2,3,4) 或 0 表示轻声。
-
----
-
-## 训练指南
-
-### 选择数据量和 Epochs
-
-目标：参数/样本比 = 10-50:1
-
-模型参数：5.4M
-
-**推荐配置：**
-
-| 数据量 | 参数比 | Epochs | 准确率 | CPU | GPU |
-|--------|--------|--------|--------|------|------|
-| 7k | 771:1 | 40-60 | 20% | 30min | 1min |
-| 50k | 108:1 | 80-150 | 70% | 300min | 15min |
-| 100k | 54:1 | 100-200 | 85% | 600min | 30min |
-
-**建议：50k 数据 + 100 epochs 最高效** ⭐
-
-### 监控训练
-
-输出位置：`outputs/validation_model/`
-- `best_model.pt` - 最佳模型
-- `logs/training_summary.json` - 训练指标
-
----
-
-## 常见问题
-
-### 如何生成数据？
-
-```bash
-python preprocess/sample_data.py -i data/wiki_latest.jsonl -o data/wiki_50k.jsonl -c 50000 --random
-```
-
-### 怎样设置 Epochs？
-
-根据数据量：7k → 40-60，50k → 80-150，100k+ → 100-200。
-
-监控验证损失，10-20 个 epochs 不下降时停止。
-
-### 支持 GPU 吗？
-
-是的，自动检测并使用（快 10-50 倍）。
-
-### 如何使用自己的数据？
-
-准备 JSONL 格式：
-```json
-{"pinyin": "...", "hanzi": "..."}
-```
-
-然后训练：
-```bash
-python model/train.py --data your_data.jsonl --epochs 100
-```
-
----
-
-## 模型信息
-
-| 指标 | 值 |
-|-----|-----|
-| 参数 | 5,400,000 |
-| 词表 | ~8,000 |
-| 速度 | 400-600ms (CPU) / 50-100ms (GPU) |
-| 内存 | ~2GB (训练) / 500MB (推理) |
-
----
 
 ## 测试
 
 ```bash
-pytest tests/ -v                    # 全部测试
-pytest tests/test_units.py -v       # 单元测试
-pytest tests/test_integration.py -v # 集成测试
+# 运行所有测试
+pytest tests/ -v
+
+# 单独测试
+python tests/test_story.py       # 段落+标点透传测试
+python tests/test_local.py       # 本地引擎基础测试
 ```
 
-状态：**32 个测试全部通过** ✅
+## 技术栈
 
----
+- **Python 3.11** + PyTorch 2.x + CUDA
+- **FastAPI** + Uvicorn（API 服务）
+- **Transformer Decoder**（SLM 语言模型）
+- **CC-CEDICT** + **jieba**（词典和词频）
+- **orjson**（高性能 JSON）
 
-## 许可证
+## API 接口
 
-MIT License
+### POST /ime
 
+主接口，返回完整信息。
+
+**请求体:**
+```json
+{
+  "pinyin": "nihao",
+  "context": "今天天气",
+  "top_k": 10
+}
+```
+
+**响应:**
+```json
+{
+  "raw_pinyin": "nihao",
+  "segmented_pinyin": ["ni", "hao"],
+  "candidates": [
+    {"text": "你好", "score": 0.95, "source": "dict"},
+    {"text": "拟好", "score": 0.82, "source": "dict"}
+  ],
+  "metadata": {"elapsed_ms": 12.5, "cached": false}
+}
+```
+
+### GET /ime/simple
+
+简单接口，只返回候选文本。
+
+```
+GET /ime/simple?pinyin=nihao&top_k=5
+```
+
+### GET /stats
+
+获取引擎统计信息（缓存命中率、SLM 调用率等）。
+
+## 版本历史
+
+- **v3.0** - 精简架构，移除 P2H，仅保留词典 + SLM Lite，标点透传
+- **v2.0** - 分层策略 (P2H + SLM)
+- **v1.0** - 初版
+
+## License
+
+MIT
