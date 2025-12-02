@@ -12,7 +12,7 @@ import argparse
 
 sys.path.insert(0, '.')
 
-from tests.config import TestConfig, TestLevel
+from tests.config import RunConfig, RunLevel
 from tests.test_comprehensive import ComprehensiveTestRunner
 
 
@@ -30,8 +30,8 @@ def main():
     if not any([args.smoke, args.full]):
         args.smoke = True
     
-    config = TestConfig(
-        level=TestLevel.FULL if args.full else TestLevel.SMOKE,
+    config = RunConfig(
+        level=RunLevel.FULL if args.full else RunLevel.SMOKE,
         verbose=not args.quiet,
         save_report=args.save,
         performance_iterations=args.iterations
