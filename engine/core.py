@@ -61,12 +61,12 @@ class IMEEngineV3:
         self.generator = CandidateGenerator(self.dict_service, self.corrector, self.config)
         
         # SLM Lite 模型 (优先加载轻量版)
-        slm_lite_path = os.path.join(self.model_dir, 'checkpoints', 'slm_lite', 'best.pt')
-        slm_lite_vocab = os.path.join(self.model_dir, 'checkpoints', 'slm_lite', 'vocab.json')
+        slm_lite_path = os.path.join(self.model_dir, 'model', 'slm_lite', 'best.pt')
+        slm_lite_vocab = os.path.join(self.model_dir, 'model', 'slm_lite', 'vocab.json')
         
         # 回退到旧版 SLM
-        slm_path = os.path.join(self.model_dir, 'checkpoints', 'slm', 'slm_best.pt')
-        slm_vocab_path = os.path.join(self.model_dir, 'checkpoints', 'slm', 'slm_vocab.json')
+        slm_path = os.path.join(self.model_dir, 'model', 'slm', 'slm_best.pt')
+        slm_vocab_path = os.path.join(self.model_dir, 'model', 'slm', 'slm_vocab.json')
         
         if os.path.exists(slm_lite_path) and os.path.exists(slm_lite_vocab):
             self._load_slm(slm_lite_path, slm_lite_vocab, "SLM Lite")

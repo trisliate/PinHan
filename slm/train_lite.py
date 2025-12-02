@@ -143,9 +143,9 @@ def evaluate(model, dataloader, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser(description='训练 SLM Lite 模型')
-    parser.add_argument('--data', type=str, default='data/train_data.jsonl')
+    parser.add_argument('--data', type=str, default='data/training/train_data.jsonl')
     parser.add_argument('--freq', type=str, default='data/dicts/char_freq.json')
-    parser.add_argument('--output', type=str, default='checkpoints/slm_lite')
+    parser.add_argument('--output', type=str, default='model/slm_lite')
     parser.add_argument('--epochs', type=int, default=15)
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--lr', type=float, default=5e-4)

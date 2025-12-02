@@ -7,7 +7,7 @@
 import os
 import sys
 import logging
-import json
+import orjson
 from datetime import datetime
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from typing import Optional
@@ -47,7 +47,7 @@ class JsonFormatter(logging.Formatter):
         if record.exc_info:
             log_data['exception'] = self.formatException(record.exc_info)
             
-        return json.dumps(log_data, ensure_ascii=False)
+        return orjson.dumps(log_data).decode('utf-8')
 
 
 class ColorFormatter(logging.Formatter):

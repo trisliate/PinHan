@@ -29,8 +29,8 @@ from engine import IMEEngineV3
 
 # 测试框架
 from tests.config import (
-    TestConfig, TestLevel, TestCase, ScenarioResult, 
-    CategoryResult, PerformanceStats, TestReport,
+    RunConfig, RunLevel, CaseResult, ScenarioResult, 
+    CategoryResult, PerformanceStats, Report,
     get_test_logger, REPORT_DIR
 )
 
@@ -40,6 +40,7 @@ from tests.datasets import (
     PROFESSIONAL_TERMS, LONG_SENTENCES, SMOKE_TESTS,
     SINGLE_CHARS, CONTEXT_DISAMBIGUATION, FUZZY_PINYIN,
     PUNCTUATION_TESTS, EDGE_CASES, STORY_INPUTS,
+    PARAGRAPH_TESTS, LONG_TEXT_TESTS,
     PERFORMANCE_TEST_INPUTS
 )
 
@@ -51,11 +52,11 @@ from tests.datasets import (
 class ComprehensiveTestRunner:
     """全方位测试执行器"""
     
-    def __init__(self, config: TestConfig = None):
-        self.config = config or TestConfig()
+    def __init__(self, config: RunConfig = None):
+        self.config = config or RunConfig()
         self.logger = get_test_logger()
         self.engine: Optional[IMEEngineV3] = None
-        self.report = TestReport()
+        self.report = Report()
         self.start_time = None
         
     def _init_engine(self):
@@ -65,7 +66,7 @@ class ComprehensiveTestRunner:
             self.engine.process("test")  # 预热
             self.logger.info("")
     
-    def _test_pinyin(self, pinyin: str, expected: str, context: str = "") -> TestCase:
+    def _test_pinyin(self, pinyin: str, expected: str, context: str = "") -> CaseResult:
         """执行单个拼音测试"""
         start = time.perf_counter()
         result = self.engine.process(pinyin, context=context)
@@ -83,7 +84,7 @@ class ComprehensiveTestRunner:
         
         case_id = f"{pinyin}_{context[:5] if context else 'no_ctx'}"
         
-        return TestCase(
+        return CaseResult(
             id=case_id,
             pinyin=pinyin,
             expected=expected,
@@ -210,7 +211,7 @@ class ComprehensiveTestRunner:
             actual = result.candidates[0].text if result.candidates else ""
             passed = actual == expected
             
-            case = TestCase(
+            case = CaseResult(
                 id=f"punct_{pinyin[:10]}",
                 pinyin=pinyin,
                 expected=expected,
@@ -300,7 +301,7 @@ class ComprehensiveTestRunner:
         self.report.performance = stats
         return stats
     
-    def run_smoke(self) -> TestReport:
+    def run_smoke(self) -> Report:
         """冒烟测试"""
         self._init_engine()
         self.start_time = time.perf_counter()
@@ -328,7 +329,7 @@ class ComprehensiveTestRunner:
         self._finalize_report()
         return self.report
     
-    def run_full(self) -> TestReport:
+    def run_full(self) -> Report:
         """完整测试"""
         self._init_engine()
         self.start_time = time.perf_counter()
@@ -366,11 +367,59 @@ class ComprehensiveTestRunner:
         # 9. 模糊音
         self.run_fuzzy_test()
         
-        # 10. 性能测试
+        # 10. 段落测试
+        self.run_paragraph_test()
+        
+        # 11. 性能测试
         self.run_performance_test()
         
         self._finalize_report()
         return self.report
+    
+    def run_paragraph_test(self) -> CategoryResult:
+        """段落级别连续输入测试"""
+        category = CategoryResult(name="段落输入")
+        
+        if self.config.verbose:
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"📖 段落输入测试")
+            self.logger.info(f"{'='*60}")
+        
+        for para in PARAGRAPH_TESTS:
+            scenario = ScenarioResult(name=para["name"], category="段落输入")
+            context = ""
+            result_text = ""
+            
+            for pinyin, expected in para["pairs"]:
+                ctx = context[-20:] if context else ""
+                case = self._test_pinyin(pinyin, expected, context=ctx)
+                case.category = "段落输入"
+                case.scenario = para["name"]
+                scenario.cases.append(case)
+                
+                # 模拟用户选择：使用期望值更新上下文
+                if case.passed:
+                    context += expected
+                    result_text += expected
+                else:
+                    context += case.actual
+                    result_text += f"[{case.actual}]"
+            
+            category.scenarios.append(scenario)
+            
+            if self.config.verbose:
+                icon = "✓" if scenario.rate >= 0.9 else ("△" if scenario.rate >= 0.7 else "✗")
+                self.logger.info(f"{icon} {para['name']}: {scenario.passed}/{scenario.total} ({scenario.rate*100:.0f}%)")
+                self.logger.info(f"   输出: {result_text[:50]}{'...' if len(result_text) > 50 else ''}")
+                
+                # 显示失败用例
+                failed = [c for c in scenario.cases if not c.passed]
+                if failed and len(failed) <= 3:
+                    for case in failed:
+                        self.logger.info(f"   ✗ '{case.pinyin}' -> '{case.actual}' (期望: '{case.expected}')")
+        
+        self.report.categories["段落输入"] = category
+        return category
     
     def _finalize_report(self):
         """完成报告"""
@@ -481,8 +530,8 @@ def main():
     
     args = parser.parse_args()
     
-    config = TestConfig(
-        level=TestLevel.SMOKE if args.level == "smoke" else TestLevel.FULL,
+    config = RunConfig(
+        level=RunLevel.SMOKE if args.level == "smoke" else RunLevel.FULL,
         verbose=not args.quiet,
         save_report=args.save,
         performance_iterations=args.iterations

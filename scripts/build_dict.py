@@ -14,7 +14,7 @@
 
 import gzip
 import re
-import json
+import orjson
 from collections import defaultdict
 from typing import Dict, List, Callable
 from pathlib import Path
@@ -365,17 +365,10 @@ def build_dictionaries():
     print("\n保存字典...")
     OUTPUT_DIR.mkdir(exist_ok=True)
     
-    with open(OUTPUT_DIR / 'word_dict.json', 'w', encoding='utf-8') as f:
-        json.dump(dict(word_dict), f, ensure_ascii=False)
-    
-    with open(OUTPUT_DIR / 'char_dict.json', 'w', encoding='utf-8') as f:
-        json.dump(dict(char_dict), f, ensure_ascii=False)
-    
-    with open(OUTPUT_DIR / 'word_freq.json', 'w', encoding='utf-8') as f:
-        json.dump(word_freq, f, ensure_ascii=False)
-    
-    with open(OUTPUT_DIR / 'char_freq.json', 'w', encoding='utf-8') as f:
-        json.dump(char_freq, f, ensure_ascii=False)
+    (OUTPUT_DIR / 'word_dict.json').write_bytes(orjson.dumps(dict(word_dict)))
+    (OUTPUT_DIR / 'char_dict.json').write_bytes(orjson.dumps(dict(char_dict)))
+    (OUTPUT_DIR / 'word_freq.json').write_bytes(orjson.dumps(word_freq))
+    (OUTPUT_DIR / 'char_freq.json').write_bytes(orjson.dumps(char_freq))
     
     all_pinyins = set(char_dict.keys())
     with open(OUTPUT_DIR / 'pinyin_table.txt', 'w', encoding='utf-8') as f:

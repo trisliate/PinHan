@@ -39,12 +39,12 @@ pip-wheel-metadata/
 # 大型数据源 - 需要手动下载
 data/sources/
 data/dicts/
-data/*.jsonl
+data/*/*.jsonl
 zhwiki-latest-pages-articles.xml
 
-# === Model Checkpoints ===
+# === Model model ===
 # 模型权重文件过大，需要单独下载
-checkpoints/
+model/
 *.pt
 *.pth
 *.ckpt
@@ -64,7 +64,7 @@ Thumbs.db
 desktop.ini
 
 # === Jupyter ===
-.ipynb_checkpoints/
+.ipynb_model/
 
 # === Secrets ===
 .env

@@ -3,7 +3,7 @@
 """
 import sys
 import logging
-import json
+import orjson
 from pathlib import Path
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -21,7 +21,7 @@ LOG_DIR.mkdir(exist_ok=True)
 REPORT_DIR.mkdir(exist_ok=True)
 
 
-class TestLevel(Enum):
+class RunLevel(Enum):
     """测试级别"""
     SMOKE = "smoke"        # 冒烟测试 - 快速验证
     BASIC = "basic"        # 基础测试 - 核心功能
@@ -30,9 +30,9 @@ class TestLevel(Enum):
 
 
 @dataclass
-class TestConfig:
+class RunConfig:
     """测试配置"""
-    level: TestLevel = TestLevel.FULL
+    level: RunLevel = RunLevel.FULL
     verbose: bool = True
     save_report: bool = True
     log_to_file: bool = True
@@ -44,7 +44,7 @@ class TestConfig:
 # 测试日志器
 # ============================================
 
-class TestFormatter(logging.Formatter):
+class LogFormatter(logging.Formatter):
     """测试专用格式化器"""
     
     COLORS = {
@@ -82,7 +82,7 @@ def get_test_logger() -> logging.Logger:
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(logging.INFO)
     if sys.stdout.isatty():
-        console.setFormatter(TestFormatter('%(message)s'))
+        console.setFormatter(LogFormatter('%(message)s'))
     else:
         console.setFormatter(logging.Formatter('%(message)s'))
     logger.addHandler(console)
@@ -107,7 +107,7 @@ def get_test_logger() -> logging.Logger:
 # ============================================
 
 @dataclass
-class TestCase:
+class CaseResult:
     """单个测试用例结果"""
     id: str
     pinyin: str
@@ -126,7 +126,7 @@ class ScenarioResult:
     """场景测试结果"""
     name: str
     category: str = ""
-    cases: List[TestCase] = field(default_factory=list)
+    cases: List[CaseResult] = field(default_factory=list)
     
     @property
     def passed(self) -> int:
@@ -181,7 +181,7 @@ class PerformanceStats:
 
 
 @dataclass
-class TestReport:
+class Report:
     """完整测试报告"""
     timestamp: str = ""
     test_level: str = ""
@@ -272,7 +272,8 @@ class TestReport:
             filename = f"test_report_{ts}.json"
         
         filepath = REPORT_DIR / filename
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+        filepath.write_bytes(
+            orjson.dumps(self.to_dict(), option=orjson.OPT_INDENT_2)
+        )
         
         return filepath
