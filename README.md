@@ -31,11 +31,12 @@
 
 | 模块 | 功能 | 文件 |
 |------|------|------|
-| **Engine** | 主引擎，协调各模块 | `engine.py` |
-| **Segmenter** | 拼音切分（动态规划） | `segmenter/segmenter.py` |
-| **Corrector** | 拼音纠错（模糊音+编辑距离） | `corrector/corrector.py` |
-| **DictService** | 词典查询服务 | `dicts/service.py` |
+| **Engine** | 主引擎，协调各模块 | `engine/core.py` |
+| **Segmenter** | 拼音切分（动态规划） | `engine/segmenter.py` |
+| **Corrector** | 拼音纠错（模糊音+编辑距离） | `engine/corrector.py` |
+| **Dictionary** | 字典查询服务 | `engine/dictionary.py` |
 | **SLM** | 语义语言模型（重排序） | `slm/model.py` |
+| **Logging** | 日志记录 | `engine/logging.py` |
 
 ## 性能指标
 
@@ -54,26 +55,27 @@
 pip install -r requirements.txt
 ```
 
-### 2. 构建词典（可选，已预置）
+### 2. 构建词典
 
 ```bash
-# 从 CC-CEDICT + jieba 构建词典
-python preprocess/build_dict.py
+python scripts/build_dict.py
 ```
 
-### 3. 训练 SLM Lite（可选，已预置）
+### 3. 准备训练数据 (可选)
 
 ```bash
-# 需要先准备训练数据
-python preprocess/build_training_data.py --xml zhwiki-latest-pages-articles.xml --max-samples 50000
+python scripts/build_training_data.py --xml zhwiki-latest-pages-articles.xml --max-samples 50000
+```
 
-# 训练模型
+### 4. 训练 SLM Lite（可选，已预置）
+
+```bash
 python slm/train_lite.py --epochs 20 --batch-size 128 --max-samples 50000
 ```
 
 模型配置: 2 层 Transformer, 128 维, 4 头, 5000 词表, ~1M 参数
 
-### 4. 启动 API 服务
+### 5. 启动 API 服务
 
 ```bash
 python -m api.server
@@ -82,7 +84,7 @@ python -m api.server
 - API 文档: http://localhost:8000/docs
 - 健康检查: http://localhost:8000/health
 
-### 5. 调用示例
+### 6. 调用示例
 
 ```bash
 # 简单查询
@@ -107,30 +109,31 @@ print([c.text for c in result.candidates])  # ['你好', '拟好', ...]
 
 ```
 PinHan/
-├── engine.py              # IME 引擎主入口
-├── api/
-│   └── server.py          # FastAPI 服务
-├── corrector/
-│   └── corrector.py       # 拼音纠错（模糊音、编辑距离）
-├── segmenter/
-│   └── segmenter.py       # 拼音切分（DP 最优切分）
-├── slm/
-│   ├── model.py           # SLM 模型定义
-│   └── train_lite.py      # SLM Lite 训练脚本
-├── dicts/
-│   ├── service.py         # 词典服务
-│   ├── char_dict.json     # 单字字典 (拼音→汉字)
-│   ├── word_dict.json     # 词组字典 (拼音序列→词组)
-│   ├── char_freq.json     # 字频表
-│   └── word_freq.json     # 词频表
-├── preprocess/
-│   ├── build_dict.py      # 词典构建脚本
-│   └── build_training_data.py  # 训练数据生成
-├── checkpoints/
-│   └── slm_lite/          # SLM Lite 模型文件
-├── tests/
-│   ├── test_story.py      # 段落输入+标点测试
-│   └── ...
+├── api/                   # API 服务
+│   └── server.py
+├── data/                  # 数据目录
+│   ├── dicts/             # 生成的字典文件
+│   ├── patches/           # 高优先级词频修正
+│   └── sources/           # 外部数据源 (SUBTLEX-CH, cedict)
+├── engine/                # 核心引擎（所有核心模块）
+│   ├── __init__.py        # 统一导出
+│   ├── core.py            # 主引擎逻辑
+│   ├── config.py          # 配置类
+│   ├── dictionary.py      # 字典查询
+│   ├── corrector.py       # 拼音纠错
+│   ├── segmenter.py       # 拼音切分
+│   ├── generator.py       # 候选生成
+│   ├── cache.py           # LRU 缓存
+│   └── logging.py         # 日志配置
+├── scripts/               # 构建脚本
+│   ├── build_dict.py
+│   └── build_training_data.py
+├── slm/                   # 语言模型
+│   ├── model.py
+│   └── train_lite.py
+├── checkpoints/           # 模型检查点
+├── logs/                  # 日志输出
+├── tests/                 # 测试
 └── requirements.txt
 ```
 
@@ -150,7 +153,7 @@ python tests/test_local.py       # 本地引擎基础测试
 - **Python 3.11** + PyTorch 2.x + CUDA
 - **FastAPI** + Uvicorn（API 服务）
 - **Transformer Decoder**（SLM 语言模型）
-- **CC-CEDICT** + **jieba**（词典和词频）
+- **SUBTLEX-CH** + **CC-CEDICT**（词频和拼音映射）
 - **orjson**（高性能 JSON）
 
 ## API 接口
@@ -192,6 +195,25 @@ GET /ime/simple?pinyin=nihao&top_k=5
 ### GET /stats
 
 获取引擎统计信息（缓存命中率、SLM 调用率等）。
+
+## 日志系统
+
+项目内置分模块日志，自动输出到 `logs/` 目录：
+
+| 日志文件 | 内容 |
+|----------|------|
+| `pinhan.api.log` | API 请求/响应日志 |
+| `pinhan.engine.log` | 引擎处理日志 |
+| `pinhan.train.log` | 模型训练日志 |
+| `*_error.log` | 错误单独记录 |
+
+```python
+# 使用日志
+from engine import get_api_logger, get_engine_logger
+
+logger = get_api_logger()
+logger.info("请求处理完成")
+```
 
 ## 版本历史
 

@@ -8,6 +8,7 @@ import os
 import sys
 import argparse
 import time
+from datetime import datetime
 from typing import List, Tuple
 
 import torch
@@ -21,6 +22,10 @@ import orjson
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from slm.model import SLModel, SLMConfig, SLMVocab
+from engine.logging import get_train_logger
+
+# 初始化日志
+logger = get_train_logger()
 
 
 # ============ 模型配置 ============
@@ -49,7 +54,7 @@ class SLMDataset(Dataset):
         self.max_len = max_len
         self.samples = []
         
-        print(f"加载数据: {data_path}")
+        logger.info(f"加载数据: {data_path}")
         with open(data_path, 'rb') as f:
             for i, line in enumerate(f):
                 if max_samples and i >= max_samples:
@@ -63,7 +68,7 @@ class SLMDataset(Dataset):
                 
                 self.samples.append(hanzi)
         
-        print(f"加载完成: {len(self.samples)} 条样本")
+        logger.info(f"加载完成: {len(self.samples)} 条样本")
     
     def __len__(self):
         return len(self.samples)
@@ -84,6 +89,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch):
     model.train()
     total_loss = 0.0
     total_tokens = 0
+    epoch_start = time.time()
     
     for batch_idx, input_ids in enumerate(dataloader):
         input_ids = input_ids.to(device)
@@ -103,7 +109,14 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch):
         
         if (batch_idx + 1) % 100 == 0:
             cur_loss = total_loss / total_tokens
-            print(f"  Epoch {epoch} | Batch {batch_idx+1}/{len(dataloader)} | Loss: {cur_loss:.4f}")
+            cur_ppl = torch.exp(torch.tensor(cur_loss)).item()
+            elapsed = time.time() - epoch_start
+            speed = total_tokens / elapsed
+            logger.debug(
+                f"Epoch {epoch} | Batch {batch_idx+1}/{len(dataloader)} | "
+                f"Loss: {cur_loss:.4f} | PPL: {cur_ppl:.2f} | "
+                f"Speed: {speed:.0f} tok/s"
+            )
     
     return total_loss / total_tokens
 
@@ -131,7 +144,7 @@ def evaluate(model, dataloader, criterion, device):
 def main():
     parser = argparse.ArgumentParser(description='训练 SLM Lite 模型')
     parser.add_argument('--data', type=str, default='data/train_data.jsonl')
-    parser.add_argument('--freq', type=str, default='dicts/char_freq.json')
+    parser.add_argument('--freq', type=str, default='data/dicts/char_freq.json')
     parser.add_argument('--output', type=str, default='checkpoints/slm_lite')
     parser.add_argument('--epochs', type=int, default=15)
     parser.add_argument('--batch-size', type=int, default=256)
@@ -143,6 +156,14 @@ def main():
     
     args = parser.parse_args()
     
+    # 训练开始日志
+    logger.info("=" * 60)
+    logger.info("SLM Lite 训练开始")
+    logger.info(f"  时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"  配置: epochs={args.epochs}, batch_size={args.batch_size}, lr={args.lr}")
+    logger.info(f"  数据: {args.data}, max_samples={args.max_samples}")
+    logger.info("=" * 60)
+    
     project_root = os.path.dirname(os.path.dirname(__file__))
     data_path = os.path.join(project_root, args.data)
     freq_path = os.path.join(project_root, args.freq)
@@ -150,21 +171,24 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    print(f"设备: {device}")
+    logger.info(f"设备: {device}")
+    if device.type == 'cuda':
+        logger.info(f"  GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"  显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
     # ============ 构建词表 ============
-    print("\n[1/4] 构建词表...")
+    logger.info("\n[1/4] 构建词表...")
     vocab = SLMVocab()
     with open(freq_path, 'rb') as f:
         char_freq = orjson.loads(f.read())
     
     # 只保留 top N 常用字
     vocab.build_from_freq(char_freq, max_vocab=args.vocab_size, min_freq=0.0)
-    print(f"  词表大小: {vocab.vocab_size}")
+    logger.info(f"  词表大小: {vocab.vocab_size}")
     vocab.save(os.path.join(output_dir, 'vocab.json'))
     
     # ============ 加载数据 ============
-    print("\n[2/4] 加载数据...")
+    logger.info("\n[2/4] 加载数据...")
     dataset = SLMDataset(data_path, vocab, max_len=LITE_CONFIG['max_len'], max_samples=args.max_samples)
     
     val_size = int(len(dataset) * args.val_split)
@@ -174,10 +198,10 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0)
     
-    print(f"  训练集: {train_size}, 验证集: {val_size}")
+    logger.info(f"  训练集: {train_size}, 验证集: {val_size}")
     
     # ============ 创建模型 ============
-    print("\n[3/4] 创建模型...")
+    logger.info("\n[3/4] 创建模型...")
     config = SLMConfig(
         vocab_size=vocab.vocab_size,
         d_model=LITE_CONFIG['d_model'],
@@ -191,30 +215,39 @@ def main():
     
     num_params = sum(p.numel() for p in model.parameters())
     model_size_mb = num_params * 4 / 1024 / 1024  # float32
-    print(f"  参数量: {num_params:,} ({model_size_mb:.2f} MB)")
-    print(f"  量化后约: {model_size_mb / 4:.2f} MB (INT8)")
+    logger.info(f"  参数量: {num_params:,} ({model_size_mb:.2f} MB)")
+    logger.info(f"  模型结构: {LITE_CONFIG['n_layers']}层, {LITE_CONFIG['d_model']}维, {LITE_CONFIG['n_heads']}头")
+    logger.info(f"  量化后约: {model_size_mb / 4:.2f} MB (INT8)")
     
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     criterion = nn.CrossEntropyLoss(ignore_index=0)
     
     # ============ 训练 ============
-    print("\n[4/4] 开始训练...")
-    print("=" * 50)
+    logger.info("\n[4/4] 开始训练...")
+    logger.info("=" * 60)
     
     best_val_loss = float('inf')
+    training_start = time.time()
     
     for epoch in range(1, args.epochs + 1):
-        start = time.time()
+        epoch_start = time.time()
         
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device, epoch)
         val_loss, val_ppl = evaluate(model, val_loader, criterion, device)
         scheduler.step()
         
-        elapsed = time.time() - start
+        elapsed = time.time() - epoch_start
         train_ppl = torch.exp(torch.tensor(train_loss)).item()
+        lr = optimizer.param_groups[0]['lr']
         
-        print(f"\nEpoch {epoch}/{args.epochs} | Train PPL: {train_ppl:.2f} | Val PPL: {val_ppl:.2f} | Time: {elapsed:.1f}s")
+        # 详细 epoch 日志
+        logger.info(
+            f"Epoch {epoch:02d}/{args.epochs} | "
+            f"Train Loss: {train_loss:.4f} | Train PPL: {train_ppl:.2f} | "
+            f"Val Loss: {val_loss:.4f} | Val PPL: {val_ppl:.2f} | "
+            f"LR: {lr:.2e} | Time: {elapsed:.1f}s"
+        )
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -225,7 +258,7 @@ def main():
                 'val_loss': val_loss,
                 'val_ppl': val_ppl,
             }, os.path.join(output_dir, 'best.pt'))
-            print(f"  ✓ 保存最佳模型 (PPL={val_ppl:.2f})")
+            logger.info(f"  ✓ 保存最佳模型 (Val PPL={val_ppl:.2f})")
     
     # 保存最终模型
     torch.save({
@@ -234,12 +267,18 @@ def main():
         'config': config,
     }, os.path.join(output_dir, 'last.pt'))
     
-    print("\n" + "=" * 50)
-    print(f"训练完成! 最佳 PPL: {torch.exp(torch.tensor(best_val_loss)).item():.2f}")
-    print(f"模型保存至: {output_dir}")
+    total_time = time.time() - training_start
+    best_ppl = torch.exp(torch.tensor(best_val_loss)).item()
+    
+    logger.info("\n" + "=" * 60)
+    logger.info("训练完成!")
+    logger.info(f"  最佳 Val PPL: {best_ppl:.2f}")
+    logger.info(f"  总训练时间: {total_time/60:.1f} 分钟")
+    logger.info(f"  模型保存至: {output_dir}")
+    logger.info("=" * 60)
     
     # ============ 测试推理速度 ============
-    print("\n测试推理速度...")
+    logger.info("\n测试推理速度...")
     model.eval()
     test_input = torch.randint(4, vocab.vocab_size, (1, 10)).to(device)
     
@@ -257,7 +296,7 @@ def main():
     torch.cuda.synchronize() if device.type == 'cuda' else None
     elapsed = (time.time() - start) / 100 * 1000
     
-    print(f"  单次推理: {elapsed:.2f} ms")
+    logger.info(f"  单次推理延迟: {elapsed:.2f} ms")
 
 
 if __name__ == '__main__':

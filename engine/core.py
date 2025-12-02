@@ -1,14 +1,17 @@
 import os
 import time
-import logging
 from typing import List, Dict, Tuple
 import torch
 
 from .config import EngineConfig, EngineOutput, CandidateResult
 from .cache import LRUCache
 from .generator import CandidateGenerator
+from .dictionary import DictionaryService
+from .corrector import create_corrector_from_dict
+from .segmenter import create_segmenter_from_dict
+from .logging import get_engine_logger
 
-logger = logging.getLogger(__name__)
+logger = get_engine_logger()
 
 class IMEEngineV3:
     """
@@ -46,11 +49,8 @@ class IMEEngineV3:
     
     def _init_modules(self):
         """初始化模块"""
-        from dicts import DictionaryService
-        from corrector import create_corrector_from_dict
-        from segmenter import create_segmenter_from_dict
-        
-        dicts_dir = os.path.join(self.model_dir, 'dicts')
+        # 字典数据位于 data/dicts
+        dicts_dir = os.path.join(self.model_dir, 'data', 'dicts')
         char_dict_path = os.path.join(dicts_dir, 'char_dict.json')
         
         self.dict_service = DictionaryService(dicts_dir)

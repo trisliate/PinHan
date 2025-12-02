@@ -1,74 +1,75 @@
-# Python cache and bytecode
+# ============================================
+# PinHan IME .gitignore
+# ============================================
+
+# === Python ===
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+*.pyd
 
-# Virtual environments
+# === Virtual Environment ===
 .venv/
 venv/
 env/
 ENV/
-venv.bak/
 .Python
 
-# Distribution / packaging
-build/
-dist/
-*.egg-info/
-pip-wheel-metadata/
-
-# IDE/editor settings
+# === IDE/Editor ===
 .vscode/
 .idea/
+*.swp
+*.bak
 
-# Python tooling
+# === Python Tools ===
 .pytest_cache/
 .mypy_cache/
 .coverage
 coverage.xml
 htmlcov/
 
-# Data outputs and large files (only cache/temp files)
-*.sqlite3
-*.db
-outputs/
-data/
+# === Packaging ===
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
 
-# Model checkpoints (too large for git)
+# === Data (Large Files) ===
+# 大型数据源 - 需要手动下载
+data/sources/
+data/dicts/
+zhwiki-latest-pages-articles.xml
+
+# === Model Checkpoints ===
+# 模型权重文件过大，需要单独下载
 checkpoints/
 *.pt
 *.pth
 *.ckpt
 *.bin
 
-# Large dataset (Wiki dump) - too large for git
-zhwiki-latest-pages-articles.xml
+# === Logs ===
+logs/
+*.log
 
-# CC-CEDICT source file (can be re-downloaded)
-preprocess/cedict.txt.gz
+# === Database ===
+*.sqlite3
+*.db
 
-# External frequency data (downloaded at build time)
-preprocess/external_freq/
-
-# OS files
+# === OS Files ===
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Jupyter
+# === Jupyter ===
 .ipynb_checkpoints/
 
-# Environment / secrets
+# === Secrets ===
 .env
 .env.*
 
-# Logs
-*.log
-
-# Compiled extensions
-*.so
-*.pyd
-
-# Misc
-*.bak
-*.swp
+# === Temporary ===
+outputs/
+tmp/
+temp/

@@ -6,17 +6,22 @@ IME-SLM FastAPI 服务
 
 import os
 import sys
+import time
+import uuid
 from typing import List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 # 添加项目根目录
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from engine import IMEEngineV3, create_engine_v3, EngineConfig
+from engine import IMEEngineV3, create_engine_v3, EngineConfig, get_api_logger
+
+# 初始化日志
+logger = get_api_logger()
 
 
 # ===== 请求/响应模型 =====
@@ -58,17 +63,25 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global engine
     
-    print("正在初始化 IME 引擎...")
+    logger.info("=" * 50)
+    logger.info("IME-SLM API 服务启动")
+    logger.info("正在初始化 IME 引擎...")
+    
     project_root = os.path.dirname(os.path.dirname(__file__))
     
     config = EngineConfig(top_k=20)
     engine = create_engine_v3(config, model_dir=project_root)
-    print("IME 引擎初始化完成")
+    
+    logger.info("IME 引擎初始化完成")
+    logger.info(f"  词典服务: {'✓' if engine.dict_service else '✗'}")
+    logger.info(f"  SLM 模型: {'✓' if engine.slm_model else '✗'}")
+    logger.info("=" * 50)
     
     yield
     
-    print("正在关闭 IME 引擎...")
+    logger.info("正在关闭 IME 引擎...")
     engine = None
+    logger.info("IME-SLM API 服务已停止")
 
 
 # ===== FastAPI 应用 =====
@@ -88,6 +101,46 @@ app.add_middleware(
 )
 
 
+# ===== 请求日志中间件 =====
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """记录所有请求的详细日志"""
+    request_id = str(uuid.uuid4())[:8]
+    start_time = time.perf_counter()
+    
+    # 请求信息
+    client_ip = request.client.host if request.client else "unknown"
+    method = request.method
+    path = request.url.path
+    query = str(request.query_params) if request.query_params else ""
+    
+    logger.info(f"[{request_id}] --> {method} {path} {query} | IP: {client_ip}")
+    
+    try:
+        response = await call_next(request)
+        
+        # 响应信息
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        status_code = response.status_code
+        
+        log_level = "info" if status_code < 400 else "warning" if status_code < 500 else "error"
+        getattr(logger, log_level)(
+            f"[{request_id}] <-- {status_code} | {elapsed_ms:.2f}ms"
+        )
+        
+        # 添加响应头
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Response-Time"] = f"{elapsed_ms:.2f}ms"
+        
+        return response
+        
+    except Exception as e:
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        logger.error(f"[{request_id}] <-- ERROR | {elapsed_ms:.2f}ms | {type(e).__name__}: {e}")
+        raise
+
+
 # ===== API 路由 =====
 
 @app.get("/health", response_model=HealthResponse)
@@ -105,16 +158,29 @@ async def process_pinyin(request: IMERequest):
     global engine
     
     if engine is None:
+        logger.error("引擎未就绪，拒绝请求")
         raise HTTPException(status_code=503, detail="引擎未就绪")
     
     if not request.pinyin.strip():
+        logger.warning(f"无效请求: 空拼音")
         raise HTTPException(status_code=400, detail="拼音不能为空")
     
     original_top_k = engine.config.top_k
     engine.config.top_k = request.top_k
     
     try:
+        start = time.perf_counter()
         result = engine.process(request.pinyin, request.context)
+        elapsed = (time.perf_counter() - start) * 1000
+        
+        # 详细日志
+        top_candidates = [c.text for c in result.candidates[:3]]
+        logger.debug(
+            f"IME 处理: '{request.pinyin}' "
+            f"| context='{request.context[:10]}...' "
+            f"| top3={top_candidates} "
+            f"| {elapsed:.2f}ms"
+        )
         
         return IMEResponse(
             raw_pinyin=result.raw_pinyin,
@@ -125,6 +191,9 @@ async def process_pinyin(request: IMERequest):
             ],
             metadata=result.metadata,
         )
+    except Exception as e:
+        logger.error(f"IME 处理失败: pinyin='{request.pinyin}', error={e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         engine.config.top_k = original_top_k
 
@@ -138,7 +207,11 @@ async def simple_query(pinyin: str, top_k: int = 10):
         raise HTTPException(status_code=503, detail="引擎未就绪")
     
     result = engine.process(pinyin)
-    return {"pinyin": pinyin, "candidates": [c.text for c in result.candidates[:top_k]]}
+    candidates = [c.text for c in result.candidates[:top_k]]
+    
+    logger.debug(f"简单查询: '{pinyin}' -> {candidates[:3]}")
+    
+    return {"pinyin": pinyin, "candidates": candidates}
 
 
 @app.get("/stats")
@@ -149,7 +222,10 @@ async def get_stats():
     if engine is None:
         raise HTTPException(status_code=503, detail="引擎未就绪")
     
-    return engine.get_stats()
+    stats = engine.get_stats()
+    logger.info(f"统计查询: {stats}")
+    
+    return stats
 
 
 # ===== 启动入口 =====
@@ -159,11 +235,20 @@ def main():
     
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
+    log_level = os.getenv("LOG_LEVEL", "info").lower()
     
-    print(f"启动 IME-SLM API 服务: http://{host}:{port}")
-    print(f"API 文档: http://{host}:{port}/docs")
+    logger.info(f"启动 IME-SLM API 服务: http://{host}:{port}")
+    logger.info(f"API 文档: http://{host}:{port}/docs")
+    logger.info(f"日志级别: {log_level.upper()}")
     
-    uvicorn.run("api.server:app", host=host, port=port, reload=False, workers=1)
+    uvicorn.run(
+        "api.server:app", 
+        host=host, 
+        port=port, 
+        reload=False, 
+        workers=1,
+        log_level=log_level,
+    )
 
 
 if __name__ == "__main__":
