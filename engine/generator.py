@@ -26,26 +26,28 @@ class CandidateGenerator:
         for pinyins in combos:
             is_original = (pinyins == segments)
             
-            # 词组匹配
-            words = self.dict_service.get_words(pinyins)
-            for i, word in enumerate(words[:20 if is_original else 5]):
-                if word in seen:
-                    continue
-                seen.add(word)
-                
-                freq = self.dict_service.get_word_freq(word)
-                # 直接使用词频作为分数
-                # 加上排名惩罚，确保词典排序优先
-                rank_bonus = 1.0 / (i + 1) * 0.1
-                score = freq + rank_bonus
-                if not is_original:
-                    score *= 0.8  # 模糊音降权
-                
-                candidates.append(CandidateResult(
-                    text=word,
-                    score=score,
-                    source="dict" if is_original else "fuzzy"
-                ))
+            # 词组匹配 - 只在多拼音时查询
+            # 单拼音查词组会错误匹配多音节词（如 xian → 西安）
+            if len(pinyins) > 1:
+                words = self.dict_service.get_words(pinyins)
+                for i, word in enumerate(words[:20 if is_original else 5]):
+                    if word in seen:
+                        continue
+                    seen.add(word)
+                    
+                    freq = self.dict_service.get_word_freq(word)
+                    # 直接使用词频作为分数
+                    # 加上排名惩罚，确保词典排序优先
+                    rank_bonus = 1.0 / (i + 1) * 0.1
+                    score = freq + rank_bonus
+                    if not is_original:
+                        score *= 0.8  # 模糊音降权
+                    
+                    candidates.append(CandidateResult(
+                        text=word,
+                        score=score,
+                        source="dict" if is_original else "fuzzy"
+                    ))
         
         # 单字候选
         if len(segments) == 1:
