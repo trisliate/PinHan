@@ -39,6 +39,7 @@ pip-wheel-metadata/
 # 大型数据源 - 需要手动下载
 data/sources/
 data/dicts/
+data/*.jsonl
 zhwiki-latest-pages-articles.xml
 
 # === Model Checkpoints ===
