@@ -137,6 +137,22 @@ def download_external_freq():
             except:
                 pass  # 静默失败，THUOCL 是补充数据
 
+    # 3. 常用词表 (使用 jieba 小词典作为核心词汇，确保高频词覆盖)
+    common_url = "https://raw.githubusercontent.com/fxsjy/jieba/master/extra_dict/dict.txt.small"
+    common_path = download_dir / "common_words.txt"
+    
+    if not common_path.exists():
+        print("  下载常用词表 (jieba small)...")
+        try:
+            req = urllib.request.Request(common_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                content = resp.read().decode('utf-8')
+                with open(common_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+        except Exception as e:
+            print(f"    常用词表下载失败: {e}")
+
+
 
 def load_jieba_big_freq() -> Dict[str, int]:
     """加载 jieba 大词典（58万词 + 词频）"""
@@ -296,83 +312,82 @@ def merge_frequencies(*freq_dicts: Dict[str, int]) -> Dict[str, int]:
     return merged
 
 
-def apply_frequency_corrections(freq: Dict[str, int]) -> Dict[str, int]:
+def load_common_words() -> Set[str]:
+    """
+    加载常用词表
+    """
+    path = SCRIPT_DIR / 'external_freq' / 'common_words.txt'
+    common_words = set()
+    
+    if path.exists():
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    # jieba dict format: word freq tag
+                    parts = line.strip().split(' ')
+                    if parts:
+                        word = parts[0].strip()
+                        if word and is_chinese_word(word):
+                            common_words.add(word)
+        except Exception as e:
+            print(f"  加载常用词表失败: {e}")
+            
+    print(f"  常用词表加载: {len(common_words):,} 词")
+    return common_words
+
+
+def apply_frequency_corrections(freq: Dict[str, int], common_words: Set[str] = None) -> Dict[str, int]:
     """
     应用词频修正规则
     
-    基于语言学规则自动修正口语词频被低估的问题：
-    1. 同音词优先级调整（日常用语 > 专有名词/书面语）
-    2. 常用搭配的频率提升
+    使用下载的常用词表 (HSK) 来修正口语词频
     """
     print("应用词频修正规则...")
     
-    # 规则1：同音词组的口语优先级修正
-    # 格式：(口语词, 书面语/专有名词) → 确保口语词频率更高
-    colloquial_priority = [
-        # (常用口语词, 低频书面词/专有名词)
-        ('一起', '一汽'),    # 日常 vs 汽车品牌
-        ('一起', '一齐'),    # 常用 vs 较正式
-        ('开心', '开新'),    # 日常 vs 专有名词
-        ('公园', '公元'),    # 日常 vs 历史术语
-        ('天气', '天奇'),    # 日常 vs 人名
-        ('朋友', '鹏友'),    # 日常 vs 罕见
-        ('什么', '神么'),    # 日常 vs 错误写法
-        ('怎么', '咋么'),    # 日常 vs 方言
-        ('可以', '渴以'),    # 日常 vs 不存在
-        ('知道', '之道'),    # 日常 vs 书面
-        ('喜欢', '稀罕'),    # 日常 vs 方言（稀罕也常用但不同义）
-        ('时候', '时后'),    # 正确 vs 错误
-        ('已经', '以经'),    # 正确 vs 错误
-        ('因为', '音为'),    # 正确 vs 错误
-        ('这样', '着样'),    # 日常 vs 不存在
-        ('那样', '哪样'),    # 日常 vs 疑问
-        ('觉得', '绝得'),    # 日常 vs 不存在
-        ('然后', '燃后'),    # 正确 vs 网络用语
-        ('我们', '卧们'),    # 正确 vs 不存在
-        ('他们', '塔们'),    # 正确 vs 不存在
-        ('她们', '塔们'),    # 正确 vs 不存在
-        # 新增常用词修正
-        ('再见', '在建'),    # 日常 vs 建筑术语
-        ('再见', '再鉴'),    # 日常 vs 书面
-        ('哪里', '那里'),    # 疑问词优先（输入法场景）
-        ('哪个', '那个'),    # 疑问词优先
-        ('来晚', '来万'),    # 日常 vs 不存在
-        ('来晚', '来挽'),    # 日常 vs 罕见
-        ('晚了', '万了'),    # 日常 vs 不存在
-        ('对不起', '对布起'), # 日常 vs 不存在
-        ('没关系', '没官系'), # 日常 vs 不存在
-        ('不客气', '不可弃'), # 日常 vs 不常用
-    ]
+    if common_words is None:
+        common_words = load_common_words()
+    
+    # 计算高频阈值 (Top 2000)
+    all_freqs = sorted(freq.values(), reverse=True)
+    if len(all_freqs) > 2000:
+        high_freq_threshold = all_freqs[2000]
+    else:
+        high_freq_threshold = 10000
+        
+    print(f"  高频阈值: {high_freq_threshold:,}")
     
     corrections_made = 0
-    for common_word, rare_word in colloquial_priority:
-        common_freq = freq.get(common_word, 0)
-        rare_freq = freq.get(rare_word, 0)
-        
-        # 如果口语词频率不够高，提升它
-        if common_freq <= rare_freq * 2:
-            # 确保口语词至少是书面词的 5 倍
-            new_freq = max(common_freq, rare_freq * 5, 10000)
-            freq[common_word] = new_freq
-            corrections_made += 1
+    added_words = 0
     
+    for word in common_words:
+        if word in freq:
+            if freq[word] < high_freq_threshold:
+                freq[word] = max(freq[word] * 5, high_freq_threshold)
+                corrections_made += 1
+        else:
+            freq[word] = high_freq_threshold
+            added_words += 1
+            
     # 规则2：常用动补结构提升
-    # 动词 + 得/着/了/过 结构在口语中极高频
     verb_complement_words = [
         '玩得', '吃得', '睡得', '跑得', '走得', '做得', '说得', '看得',
         '听得', '想得', '学得', '写得', '读得', '唱得', '跳得',
     ]
     for word in verb_complement_words:
         if word in freq:
-            # 确保这些词有足够高的频率
-            freq[word] = max(freq[word], 5000)
+            freq[word] = max(freq[word], high_freq_threshold // 2)
             corrections_made += 1
-    
-    print(f"  修正词条: {corrections_made}")
+            
+    print(f"  修正词条: {corrections_made}, 新增词条: {added_words}")
     return freq
 
 
 # ============ 拼音工具 ============
+
+def is_chinese_word(word: str) -> bool:
+    """检查是否为纯中文词"""
+    return all('\u4e00' <= c <= '\u9fff' for c in word)
+
 
 def word_to_pinyin(word: str) -> List[str]:
     """汉字词组 → 拼音列表"""
@@ -387,11 +402,6 @@ def word_to_pinyin(word: str) -> List[str]:
         return result
     except:
         return []
-
-
-def is_chinese_word(word: str) -> bool:
-    """检查是否为纯中文词"""
-    return all('\u4e00' <= c <= '\u9fff' for c in word)
 
 
 # ============ 构建字典 ============

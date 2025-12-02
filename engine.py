@@ -211,7 +211,8 @@ class IMEEngineV3:
                     corrected = self._correct(segments)
                     candidates = self._dict_lookup(corrected)
                     
-                    use_slm = self.reranker and len(candidates) > 1 and running_context
+                    # 只有在配置启用且模型存在时才使用 SLM
+                    use_slm = self.config.use_slm and self.reranker and len(candidates) > 1 and running_context
                     if use_slm:
                         self.stats['slm_calls'] += 1
                         candidates = self._rerank(candidates, running_context)
