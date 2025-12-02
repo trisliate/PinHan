@@ -14,12 +14,10 @@ beng
 bi
 bia
 bian
-biang
 biao
 bie
 bin
 bing
-biu
 bo
 bu
 ca
@@ -104,7 +102,6 @@ ge
 gei
 gen
 geng
-ging
 gong
 gou
 gu
@@ -215,6 +212,7 @@ miu
 mo
 mou
 mu
+n
 na
 nai
 nan
@@ -242,7 +240,6 @@ nv
 nve
 o
 ou
-p
 pa
 pai
 pan
@@ -260,7 +257,6 @@ ping
 po
 pou
 pu
-q
 qi
 qia
 qian
@@ -326,7 +322,6 @@ suan
 sui
 sun
 suo
-t
 ta
 tai
 tan
@@ -347,7 +342,6 @@ tuan
 tui
 tun
 tuo
-w
 wa
 wai
 wan

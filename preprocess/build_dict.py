@@ -1,684 +1,323 @@
 """
-字典构建脚本 v3 - 多源 NLP 数据融合
+字典构建脚本 v4 - 对话优先 (Dialogue-First)
 
-数据源优先级：
-1. CC-CEDICT    - 拼音映射（权威标准）
-2. 腾讯词向量   - 800万词，现代语料词频
-3. jieba 词频表 - 48万词，补充覆盖
-4. pypinyin     - 拼音转换
+数据源:
+1. SUBTLEX-CH   - 电影字幕词频 (3350万字，最接近口语)
+2. CC-CEDICT    - 拼音映射 (权威标准)
+3. pypinyin     - 拼音转换 (补充 CEDICT 缺失)
 
-无需手动维护词表！所有词频来自真实语料统计。
+设计理念:
+- 彻底抛弃 jieba/THUOCL 的书面语频率
+- 词频决定一切: "去" > "区", "和" > "河"
+- 字频从词频推断: P(去) = Σ P(含"去"的词)
 """
 
 import gzip
 import os
 import re
+import json
 from collections import defaultdict
 from typing import Dict, List, Set, Tuple
-import orjson
-import jieba
-import pypinyin
 from pathlib import Path
 
+import pypinyin
 
 # ============ 路径配置 ============
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 OUTPUT_DIR = PROJECT_ROOT / 'dicts'
+
 CEDICT_PATH = SCRIPT_DIR / 'cedict.txt.gz'
-
-# 外部词频数据（如果已下载）
-TENCENT_FREQ_PATH = SCRIPT_DIR / 'tencent_word_freq.txt'
+SUBTLEX_PATH = SCRIPT_DIR / 'SUBTLEX-CH' / 'SUBTLEX-CH-WF'
 
 
-# ============ CC-CEDICT 解析 ============
+# ============ 工具函数 ============
 
-def parse_cedict_line(line: str) -> Tuple[str, str, List[str]]:
-    """解析 CC-CEDICT 单行"""
-    line = line.strip()
-    if not line or line.startswith('#'):
-        return None, None, None
-    
-    match = re.match(r'^(\S+)\s+(\S+)\s+\[([^\]]+)\]', line)
-    if not match:
-        return None, None, None
-    
-    traditional = match.group(1)
-    simplified = match.group(2)
-    pinyin_raw = match.group(3)
-    
-    pinyins = []
-    for py in pinyin_raw.split():
-        py = py.lower()
-        py = re.sub(r'[1-5]', '', py)
-        py = py.replace('ü', 'v').replace('u:', 'v')
-        if py:
-            pinyins.append(py)
-    
-    return simplified, traditional, pinyins
-
-
-def load_cedict() -> List[Tuple[str, str, List[str]]]:
-    """加载 CC-CEDICT"""
-    entries = []
-    
-    if not CEDICT_PATH.exists():
-        print(f"  警告: CC-CEDICT 不存在: {CEDICT_PATH}")
-        return entries
-    
-    print(f"加载 CC-CEDICT: {CEDICT_PATH}")
-    with gzip.open(CEDICT_PATH, 'rt', encoding='utf-8') as f:
-        for line in f:
-            simplified, traditional, pinyins = parse_cedict_line(line)
-            if simplified and pinyins:
-                entries.append((simplified, traditional, pinyins))
-    
-    print(f"  CC-CEDICT 词条: {len(entries):,}")
-    return entries
-
-
-# ============ 多源词频加载 ============
-
-def load_jieba_freq() -> Dict[str, int]:
-    """加载 jieba 词频表"""
-    print("加载 jieba 词频表...")
-    jieba.initialize()
-    freq = dict(jieba.dt.FREQ)
-    print(f"  jieba 词条: {len(freq):,}")
-    return freq
-
-
-def download_external_freq():
-    """
-    下载外部词频数据
-    
-    数据源：
-    1. jieba 大词典 (58万词，包含词频)
-    2. THUOCL 清华词库 (领域专用词)
-    """
-    import urllib.request
-    
-    download_dir = SCRIPT_DIR / 'external_freq'
-    download_dir.mkdir(exist_ok=True)
-    
-    # 1. jieba 大词典（最重要，58万词 + 词频）
-    jieba_big_url = 'https://raw.githubusercontent.com/fxsjy/jieba/master/extra_dict/dict.txt.big'
-    jieba_big_path = download_dir / 'jieba_dict_big.txt'
-    
-    if not jieba_big_path.exists():
-        print("  下载 jieba 大词典 (8MB)...")
-        try:
-            req = urllib.request.Request(jieba_big_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                with open(jieba_big_path, 'wb') as f:
-                    f.write(resp.read())
-            print("    下载成功!")
-        except Exception as e:
-            print(f"    下载失败: {e}")
-    
-    # 2. 清华 THUOCL 词库（领域词汇补充）
-    thuocl_urls = [
-        ('https://raw.githubusercontent.com/thunlp/THUOCL/master/data/THUOCL_animal.txt', 'thuocl_animal.txt'),
-        ('https://raw.githubusercontent.com/thunlp/THUOCL/master/data/THUOCL_food.txt', 'thuocl_food.txt'),
-        ('https://raw.githubusercontent.com/thunlp/THUOCL/master/data/THUOCL_lishimingren.txt', 'thuocl_history.txt'),
-        ('https://raw.githubusercontent.com/thunlp/THUOCL/master/data/THUOCL_caijing.txt', 'thuocl_finance.txt'),
-        ('https://raw.githubusercontent.com/thunlp/THUOCL/master/data/THUOCL_car.txt', 'thuocl_car.txt'),
-        ('https://raw.githubusercontent.com/thunlp/THUOCL/master/data/THUOCL_chengyu.txt', 'thuocl_chengyu.txt'),
-        ('https://raw.githubusercontent.com/thunlp/THUOCL/master/data/THUOCL_diming.txt', 'thuocl_place.txt'),
-        ('https://raw.githubusercontent.com/thunlp/THUOCL/master/data/THUOCL_law.txt', 'thuocl_law.txt'),
-        ('https://raw.githubusercontent.com/thunlp/THUOCL/master/data/THUOCL_medical.txt', 'thuocl_medical.txt'),
-    ]
-    
-    for url, filename in thuocl_urls:
-        path = download_dir / filename
-        if not path.exists():
-            try:
-                urllib.request.urlretrieve(url, path)
-            except:
-                pass  # 静默失败，THUOCL 是补充数据
-
-    # 3. 常用词表 (使用 jieba 小词典作为核心词汇，确保高频词覆盖)
-    common_url = "https://raw.githubusercontent.com/fxsjy/jieba/master/extra_dict/dict.txt.small"
-    common_path = download_dir / "common_words.txt"
-    
-    if not common_path.exists():
-        print("  下载常用词表 (jieba small)...")
-        try:
-            req = urllib.request.Request(common_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                content = resp.read().decode('utf-8')
-                with open(common_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-        except Exception as e:
-            print(f"    常用词表下载失败: {e}")
-
-
-
-def load_jieba_big_freq() -> Dict[str, int]:
-    """加载 jieba 大词典（58万词 + 词频）"""
-    path = SCRIPT_DIR / 'external_freq' / 'jieba_dict_big.txt'
-    
-    if not path.exists():
-        return {}
-    
-    freq = {}
-    print(f"  加载 jieba 大词典: {path}")
-    
-    with open(path, 'r', encoding='utf-8') as f:
-        for line in f:
-            parts = line.strip().split(' ')
-            if len(parts) >= 2:
-                word = parts[0]
-                try:
-                    count = int(parts[1])
-                    freq[word] = count
-                except:
-                    pass
-    
-    print(f"    词条数: {len(freq):,}")
-    return freq
-
-
-def load_thuocl_freq() -> Dict[str, int]:
-    """加载清华 THUOCL 词频"""
-    download_dir = SCRIPT_DIR / 'external_freq'
-    
-    if not download_dir.exists():
-        return {}
-    
-    freq = {}
-    for path in download_dir.glob('thuocl_*.txt'):
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 2:
-                        word, count = parts[0], int(parts[1])
-                        freq[word] = max(freq.get(word, 0), count)
-        except:
-            continue
-    
-    return freq
-
-
-def load_web_ngram_freq() -> Dict[str, int]:
-    """
-    从网络加载现代中文词频数据
-    使用 HuggingFace datasets 加载公开词频
-    """
-    try:
-        from datasets import load_dataset
-        
-        print("尝试加载在线词频数据...")
-        # 这里可以替换为实际可用的数据集
-        # 例如：中文维基、新闻语料的词频统计
-        
-        # 暂时返回空，后续可扩展
-        return {}
-    except Exception as e:
-        print(f"  在线词频加载失败: {e}")
-        return {}
-
-
-def generate_bigram_freq_from_corpus(jieba_freq: Dict[str, int]) -> Dict[str, int]:
-    """
-    基于单字频率生成常用二字词估计频率
-    
-    原理：
-    - 对于动词+得/着/了 结构，概率 = P(动词) * P(结构词)
-    - 对于 程度副词+形容词 结构，类似处理
-    
-    这比手动添加更科学，可以自动覆盖大量组合
-    """
-    print("生成结构化词组频率...")
-    
-    generated = {}
-    
-    # 常见结构词的相对频率权重
-    structure_weights = {
-        # 得字结构（动词+得）
-        '得': 0.5,
-        '着': 0.3,
-        '了': 0.4,
-        # 方向补语
-        '来': 0.3,
-        '去': 0.3,
-        '上': 0.2,
-        '下': 0.2,
-        '进': 0.15,
-        '出': 0.15,
-        '回': 0.15,
-        '过': 0.2,
-        '起': 0.15,
-        '开': 0.15,
-    }
-    
-    # 程度副词
-    degree_adverbs = {
-        '很': 1.0,
-        '太': 0.8,
-        '真': 0.7,
-        '好': 0.6,
-        '挺': 0.5,
-        '非常': 0.6,
-        '特别': 0.5,
-        '相当': 0.4,
-        '十分': 0.4,
-        '极其': 0.3,
-    }
-    
-    # 常见形容词（从 jieba 高频词中提取）
-    common_adj = ['好', '大', '小', '多', '少', '快', '慢', '高', '低', '长', '短',
-                  '美', '丑', '胖', '瘦', '新', '旧', '冷', '热', '难', '易', '强', '弱',
-                  '棒', '差', '贵', '便宜', '开心', '难过', '漂亮', '厉害']
-    
-    # 常见动词（单字）
-    common_verbs = ['吃', '喝', '玩', '看', '听', '说', '读', '写', '走', '跑', 
-                    '跳', '唱', '做', '想', '学', '教', '买', '卖', '睡', '坐',
-                    '站', '拿', '放', '开', '关', '穿', '脱', '洗', '干', '打']
-    
-    # 生成 动词+结构词 组合
-    for verb in common_verbs:
-        verb_freq = jieba_freq.get(verb, 100)
-        for suffix, weight in structure_weights.items():
-            word = verb + suffix
-            if word not in jieba_freq or jieba_freq.get(word, 0) == 0:
-                # 估算频率 = 动词频率 * 结构权重
-                generated[word] = int(verb_freq * weight * 0.1)
-    
-    # 生成 程度副词+形容词 组合
-    for adv, adv_weight in degree_adverbs.items():
-        for adj in common_adj:
-            word = adv + adj
-            adj_freq = jieba_freq.get(adj, 50)
-            if word not in jieba_freq or jieba_freq.get(word, 0) == 0:
-                generated[word] = int(adj_freq * adv_weight * 0.2)
-    
-    print(f"  生成结构化词组: {len(generated):,}")
-    return generated
-
-
-# ============ 词频融合 ============
-
-def merge_frequencies(*freq_dicts: Dict[str, int]) -> Dict[str, int]:
-    """
-    融合多个词频字典
-    策略：取最大值（因为不同语料可能低估某些词）
-    """
-    merged = {}
-    for freq_dict in freq_dicts:
-        for word, freq in freq_dict.items():
-            merged[word] = max(merged.get(word, 0), freq)
-    return merged
-
-
-def load_common_words() -> Set[str]:
-    """
-    加载常用词表
-    """
-    path = SCRIPT_DIR / 'external_freq' / 'common_words.txt'
-    common_words = set()
-    
-    if path.exists():
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    # jieba dict format: word freq tag
-                    parts = line.strip().split(' ')
-                    if parts:
-                        word = parts[0].strip()
-                        if word and is_chinese_word(word):
-                            common_words.add(word)
-        except Exception as e:
-            print(f"  加载常用词表失败: {e}")
-            
-    print(f"  常用词表加载: {len(common_words):,} 词")
-    return common_words
-
-
-def apply_frequency_corrections(freq: Dict[str, int], common_words: Set[str] = None) -> Dict[str, int]:
-    """
-    应用词频修正规则
-    
-    使用下载的常用词表 (HSK) 来修正口语词频
-    """
-    print("应用词频修正规则...")
-    
-    if common_words is None:
-        common_words = load_common_words()
-    
-    # 计算高频阈值 (Top 2000)
-    all_freqs = sorted(freq.values(), reverse=True)
-    if len(all_freqs) > 2000:
-        high_freq_threshold = all_freqs[2000]
-    else:
-        high_freq_threshold = 10000
-        
-    print(f"  高频阈值: {high_freq_threshold:,}")
-    
-    corrections_made = 0
-    added_words = 0
-    
-    for word in common_words:
-        if word in freq:
-            if freq[word] < high_freq_threshold:
-                freq[word] = max(freq[word] * 5, high_freq_threshold)
-                corrections_made += 1
-        else:
-            freq[word] = high_freq_threshold
-            added_words += 1
-            
-    # 规则2：常用动补结构提升
-    verb_complement_words = [
-        '玩得', '吃得', '睡得', '跑得', '走得', '做得', '说得', '看得',
-        '听得', '想得', '学得', '写得', '读得', '唱得', '跳得',
-    ]
-    for word in verb_complement_words:
-        if word in freq:
-            freq[word] = max(freq[word], high_freq_threshold // 2)
-            corrections_made += 1
-            
-    print(f"  修正词条: {corrections_made}, 新增词条: {added_words}")
-    return freq
-
-
-# ============ 拼音工具 ============
-
-def is_chinese_word(word: str) -> bool:
-    """检查是否为纯中文词"""
-    return all('\u4e00' <= c <= '\u9fff' for c in word)
-
+def is_chinese(text: str) -> bool:
+    """检查是否为纯中文"""
+    return all('\u4e00' <= c <= '\u9fff' for c in text)
 
 def word_to_pinyin(word: str) -> List[str]:
-    """汉字词组 → 拼音列表"""
+    """获取词语的拼音列表 (无声调)"""
     try:
-        pys = pypinyin.pinyin(word, style=pypinyin.NORMAL, errors='ignore')
+        pys = pypinyin.lazy_pinyin(word, style=pypinyin.Style.NORMAL)
+        # 清理: 去除非字母
         result = []
-        for py_list in pys:
-            if py_list:
-                py = py_list[0].lower().replace('ü', 'v')
-                if py and py.isalpha():
-                    result.append(py)
+        for py in pys:
+            py = py.lower()
+            py = re.sub(r'[^a-z]', '', py)
+            if py:
+                result.append(py)
         return result
     except:
         return []
 
 
-# ============ 构建字典 ============
+# ============ 数据加载 ============
 
-def build_char_dict_from_cedict(entries: List[Tuple[str, str, List[str]]]) -> Dict[str, Set[str]]:
-    """从 CC-CEDICT 构建单字字典"""
-    print("构建单字字典...")
+def load_subtlex() -> Dict[str, float]:
+    """
+    加载 SUBTLEX-CH 词频表
+    返回: { '我': 50147.83, '你好': 123.45, ... } (每百万词频率)
+    """
+    print(f"加载 SUBTLEX-CH: {SUBTLEX_PATH}")
+    freq_map = {}
     
-    char_dict = defaultdict(set)
-    for simplified, traditional, pinyins in entries:
-        if len(simplified) == 1 and len(pinyins) == 1:
-            char_dict[pinyins[0]].add(simplified)
-            if traditional != simplified:
-                char_dict[pinyins[0]].add(traditional)
+    if not SUBTLEX_PATH.exists():
+        print("⚠ SUBTLEX-CH 未找到！请下载并放置到 preprocess/SUBTLEX-CH/ 目录")
+        return freq_map
     
-    print(f"  拼音数: {len(char_dict)}, 单字数: {sum(len(v) for v in char_dict.values()):,}")
-    return char_dict
-
-
-def build_word_dict(
-    merged_freq: Dict[str, int],
-    char_dict: Dict[str, Set[str]],
-    cedict_entries: List[Tuple[str, str, List[str]]],
-    min_freq: int = 1,
-    max_word_len: int = 8
-) -> Dict[str, List[str]]:
-    """构建词组字典"""
-    print(f"构建词组字典...")
+    with open(SUBTLEX_PATH, 'r', encoding='gb2312', errors='ignore') as f:
+        lines = f.readlines()
     
-    valid_pinyins = set(char_dict.keys())
-    word_dict = defaultdict(list)
+    # 跳过前3行 (标题)
+    for line in lines[3:]:
+        parts = line.strip().split('\t')
+        if len(parts) >= 3:
+            word = parts[0]
+            try:
+                # W/million 列 (每百万词频率)
+                wpm = float(parts[2])
+                if is_chinese(word):
+                    freq_map[word] = wpm
+            except (ValueError, IndexError):
+                pass
     
-    # 从词频表构建
-    for word, freq in merged_freq.items():
-        if freq < min_freq:
-            continue
-        if len(word) < 2 or len(word) > max_word_len:
-            continue
-        if not is_chinese_word(word):
-            continue
-        
-        pinyins = word_to_pinyin(word)
-        if not pinyins or len(pinyins) != len(word):
-            continue
-        if not all(py in valid_pinyins for py in pinyins):
-            continue
-        
-        key = ' '.join(pinyins)
-        if word not in word_dict[key]:
-            word_dict[key].append(word)
+    print(f"  SUBTLEX-CH 词条: {len(freq_map):,}")
     
-    # 合并 CC-CEDICT 词组
-    added = 0
-    for simplified, traditional, pinyins in cedict_entries:
-        if len(simplified) >= 2 and len(pinyins) == len(simplified):
-            key = ' '.join(pinyins)
-            if simplified not in word_dict.get(key, []):
-                if key not in word_dict:
-                    word_dict[key] = []
-                word_dict[key].append(simplified)
-                added += 1
+    # 显示 Top 10
+    top10 = sorted(freq_map.items(), key=lambda x: x[1], reverse=True)[:10]
+    print(f"  Top 10: {[w for w, _ in top10]}")
     
-    print(f"  词组拼音组合: {len(word_dict):,}")
-    print(f"  词组总数: {sum(len(v) for v in word_dict.values()):,}")
-    print(f"  从 CC-CEDICT 补充: {added:,}")
-    
-    return dict(word_dict)
+    return freq_map
 
 
-# ============ 频率表构建 ============
+def load_cedict() -> Dict[str, List[str]]:
+    """
+    加载 CC-CEDICT
+    返回: { 'ni hao': ['你好'], 'qu': ['去', '区', '取', ...], ... }
+    """
+    print(f"加载 CC-CEDICT: {CEDICT_PATH}")
+    mapping = defaultdict(list)
+    
+    if not CEDICT_PATH.exists():
+        print("⚠ CC-CEDICT 未找到！")
+        return mapping
+    
+    with gzip.open(CEDICT_PATH, 'rt', encoding='utf-8') as f:
+        for line in f:
+            if line.startswith('#') or not line.strip():
+                continue
+            
+            match = re.match(r'^(\S+)\s+(\S+)\s+\[([^\]]+)\]', line)
+            if not match:
+                continue
+            
+            simplified = match.group(2)
+            pinyin_raw = match.group(3)
+            
+            # 标准化拼音
+            pinyins = []
+            for py in pinyin_raw.split():
+                py = py.lower()
+                py = re.sub(r'[1-5]', '', py)  # 去声调
+                py = py.replace('ü', 'v').replace('u:', 'v')
+                if py.isalpha():
+                    pinyins.append(py)
+            
+            if pinyins and is_chinese(simplified):
+                key = ' '.join(pinyins)
+                if simplified not in mapping[key]:
+                    mapping[key].append(simplified)
+    
+    print(f"  CC-CEDICT 拼音组合: {len(mapping):,}")
+    return mapping
 
-def build_char_freq(
-    char_dict: Dict[str, Set[str]], 
-    merged_freq: Dict[str, int]
-) -> Dict[str, float]:
-    """构建字频表"""
-    print("构建字频表...")
+
+# ============ 核心构建逻辑 ============
+
+def build_dictionaries():
+    """构建所有字典文件"""
     
-    all_chars = set()
-    for chars in char_dict.values():
-        all_chars.update(chars)
+    # 1. 加载数据源
+    subtlex_freq = load_subtlex()
+    cedict_map = load_cedict()
     
-    char_freq_raw = {char: merged_freq.get(char, 0) for char in all_chars}
+    if not subtlex_freq:
+        print("❌ 无法继续: SUBTLEX-CH 数据缺失")
+        return
     
-    # 简体字优先：如果简繁体都存在，给简体加权
-    # 使用 opencc 或简单的映射表
-    try:
-        from opencc import OpenCC
-        t2s = OpenCC('t2s')  # 繁体转简体
-        
-        # 找出繁体字并降权
-        for char in list(char_freq_raw.keys()):
-            simplified = t2s.convert(char)
-            if simplified != char and simplified in char_freq_raw:
-                # 这是繁体字，简体也存在，降低繁体权重
-                char_freq_raw[char] = char_freq_raw[char] * 0.1
-    except ImportError:
-        # 没有 opencc，使用简单的常见繁简映射
-        traditional_to_simple = {
-            '嗎': '吗', '馬': '马', '媽': '妈', '罵': '骂',
-            '電': '电', '話': '话', '說': '说', '讀': '读',
-            '寫': '写', '買': '买', '賣': '卖', '開': '开',
-            '關': '关', '門': '门', '問': '问', '聽': '听',
-            '見': '见', '覺': '觉', '學': '学', '樂': '乐',
-            '東': '东', '車': '车', '書': '书', '飛': '飞',
-            '機': '机', '體': '体', '頭': '头', '臉': '脸',
-            '愛': '爱', '國': '国', '語': '语', '時': '时',
-            '現': '现', '視': '视', '觀': '观', '點': '点',
-            '樹': '树', '雲': '云', '風': '风', '陽': '阳',
-        }
-        for trad, simp in traditional_to_simple.items():
-            if trad in char_freq_raw and simp in char_freq_raw:
-                char_freq_raw[trad] = char_freq_raw[trad] * 0.1
+    # 2. 构建词频表 (归一化到概率)
+    print("\n构建词频表...")
+    total_freq = sum(subtlex_freq.values())
+    word_freq = {}
     
-    total = sum(char_freq_raw.values()) or 1
+    for word, wpm in subtlex_freq.items():
+        # wpm = 每百万词出现次数, 转换为概率
+        prob = wpm / 1_000_000
+        word_freq[word] = prob
     
-    char_freq = {}
-    min_freq = 1e-9
-    for char, freq in char_freq_raw.items():
-        normalized = freq / total
-        char_freq[char] = max(normalized, min_freq)
+    print(f"  词频条目: {len(word_freq):,}")
+    
+    # 3. 构建字频表 (从词频推断)
+    # 逻辑: P(字) = Σ P(含该字的词) * 权重
+    # 单字词权重更高, 多字词中的字权重递减
+    print("构建字频表 (从词频推断)...")
+    char_freq_raw = defaultdict(float)
+    
+    for word, prob in word_freq.items():
+        n = len(word)
+        for i, char in enumerate(word):
+            # 单字词: 权重 1.0
+            # 多字词: 权重 1/n (平均分配)
+            weight = 1.0 if n == 1 else (1.0 / n)
+            char_freq_raw[char] += prob * weight
+    
+    # 归一化
+    total_char = sum(char_freq_raw.values())
+    char_freq = {c: p / total_char for c, p in char_freq_raw.items()}
     
     print(f"  字频条目: {len(char_freq):,}")
-    return char_freq
-
-
-def build_word_freq(
-    word_dict: Dict[str, List[str]], 
-    merged_freq: Dict[str, int]
-) -> Dict[str, float]:
-    """构建词频表"""
-    print("构建词频表...")
     
-    all_words = set()
-    for words in word_dict.values():
-        all_words.update(words)
+    # 验证: 检查 "去" vs "区"
+    qu_chars = [(c, char_freq.get(c, 0)) for c in ['去', '区', '取', '曲']]
+    qu_chars.sort(key=lambda x: x[1], reverse=True)
+    print(f"  验证 'qu': {qu_chars}")
     
-    word_freq_raw = {word: merged_freq.get(word, 0) for word in all_words}
-    total = sum(word_freq_raw.values()) or 1
+    he_chars = [(c, char_freq.get(c, 0)) for c in ['和', '河', '合', '何']]
+    he_chars.sort(key=lambda x: x[1], reverse=True)
+    print(f"  验证 'he': {he_chars}")
     
-    word_freq = {}
-    for word, freq in word_freq_raw.items():
-        normalized = freq / total
-        if normalized == 0:
-            normalized = 1e-9 / len(word)
-        word_freq[word] = normalized
+    # 4. 构建词典 (拼音 -> 词/字 列表, 按频率排序)
+    print("\n构建词典...")
     
-    valid = sum(1 for w, f in word_freq.items() if merged_freq.get(w, 0) > 0)
-    print(f"  词频条目: {len(word_freq):,}, 有频率数据: {valid:,}")
-    return word_freq
-
-
-# ============ 排序优化 ============
-
-def sort_dict_by_freq(d: Dict[str, list], freq: Dict[str, float]) -> Dict[str, List[str]]:
-    """按频率排序"""
-    return {
-        key: sorted(items, key=lambda x: freq.get(x, 0), reverse=True)
-        for key, items in d.items()
-    }
-
-
-# ============ 保存 ============
-
-def save_json(data, filename: str):
-    path = OUTPUT_DIR / filename
+    word_dict = defaultdict(list)
+    char_dict = defaultdict(list)
+    
+    # 4.1 构建 word -> pinyin 映射
+    word_to_py = {}
+    
+    # 从 CEDICT 获取拼音
+    for py_key, words in cedict_map.items():
+        for w in words:
+            if w not in word_to_py:
+                word_to_py[w] = py_key
+    
+    # 用 pypinyin 补充缺失
+    for word in word_freq.keys():
+        if word not in word_to_py:
+            pys = word_to_pinyin(word)
+            if pys:
+                word_to_py[word] = ' '.join(pys)
+    
+    # 4.2 填充词典 (按频率排序)
+    # 先收集每个拼音下的所有词
+    py_to_words = defaultdict(list)
+    for word, py_key in word_to_py.items():
+        if word in word_freq and len(word) >= 2:
+            py_to_words[py_key].append((word, word_freq[word]))
+    
+    # 排序并填充
+    for py_key, items in py_to_words.items():
+        items.sort(key=lambda x: x[1], reverse=True)
+        word_dict[py_key] = [w for w, _ in items]
+    
+    # 4.3 填充单字典 (按频率排序)
+    py_to_chars = defaultdict(list)
+    
+    for char, freq in char_freq.items():
+        pys = word_to_pinyin(char)
+        if pys and len(pys) == 1:
+            py_to_chars[pys[0]].append((char, freq))
+    
+    # 从 CEDICT 补充 (处理多音字)
+    for py_key, words in cedict_map.items():
+        if ' ' not in py_key:  # 单音节
+            for w in words:
+                if len(w) == 1:
+                    freq = char_freq.get(w, 1e-10)
+                    if (w, freq) not in py_to_chars[py_key]:
+                        # 检查是否已存在
+                        existing = [c for c, _ in py_to_chars[py_key]]
+                        if w not in existing:
+                            py_to_chars[py_key].append((w, freq))
+    
+    # 排序并填充
+    for py, items in py_to_chars.items():
+        items.sort(key=lambda x: x[1], reverse=True)
+        char_dict[py] = [c for c, _ in items]
+    
+    # 5. 补充 CEDICT 中有但 SUBTLEX 没有的词 (作为低频兜底)
+    print("补充 CEDICT 词条...")
+    added = 0
+    for py_key, words in cedict_map.items():
+        if ' ' in py_key:  # 多音节词
+            for w in words:
+                if w not in word_freq:
+                    word_freq[w] = 1e-10  # 极低频率
+                    if py_key not in word_dict:
+                        word_dict[py_key] = []
+                    if w not in word_dict[py_key]:
+                        word_dict[py_key].append(w)
+                        added += 1
+    print(f"  补充词条: {added:,}")
+    
+    # 6. 保存
+    print("\n保存字典...")
     OUTPUT_DIR.mkdir(exist_ok=True)
-    with open(path, 'wb') as f:
-        f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
-    print(f"  已保存: {path}")
-
-
-def save_txt(lines: List[str], filename: str):
-    path = OUTPUT_DIR / filename
-    with open(path, 'w', encoding='utf-8') as f:
-        for line in lines:
-            f.write(line + '\n')
-    print(f"  已保存: {path}")
-
-
-# ============ 验证 ============
-
-def verify_dict(word_dict: Dict[str, List[str]], word_freq: Dict[str, float]):
-    """验证常用词"""
-    print("\n验证常用词...")
     
-    test_words = [
-        ('hen hao', '很好'),
-        ('gong yuan', '公园'),
-        ('tian qi', '天气'),
-        ('wan de', '玩得'),
-        ('wo men', '我们'),
-        ('ta men', '他们'),
-        ('peng you', '朋友'),
-        ('kai xin', '开心'),
+    # JSON 保存
+    with open(OUTPUT_DIR / 'word_dict.json', 'w', encoding='utf-8') as f:
+        json.dump(dict(word_dict), f, ensure_ascii=False)
+    
+    with open(OUTPUT_DIR / 'char_dict.json', 'w', encoding='utf-8') as f:
+        json.dump(dict(char_dict), f, ensure_ascii=False)
+    
+    with open(OUTPUT_DIR / 'word_freq.json', 'w', encoding='utf-8') as f:
+        json.dump(word_freq, f, ensure_ascii=False)
+    
+    with open(OUTPUT_DIR / 'char_freq.json', 'w', encoding='utf-8') as f:
+        json.dump(char_freq, f, ensure_ascii=False)
+    
+    # 拼音表
+    all_pinyins = set(char_dict.keys())
+    with open(OUTPUT_DIR / 'pinyin_table.txt', 'w', encoding='utf-8') as f:
+        for py in sorted(all_pinyins):
+            f.write(py + '\n')
+    
+    # 7. 验证
+    print("\n" + "=" * 50)
+    print("验证常用词...")
+    
+    test_cases = [
+        ('qu', '去', 'char'),
+        ('he', '和', 'char'),
+        ('peng you', '朋友', 'word'),
+        ('yi qi', '一起', 'word'),
+        ('wo men', '我们', 'word'),
+        ('shen me', '什么', 'word'),
     ]
     
-    for key, expected in test_words:
-        words = word_dict.get(key, [])
-        if expected in words:
-            rank = words.index(expected) + 1
-            freq = word_freq.get(expected, 0)
-            print(f"  ✓ {key} → {expected} (排名#{rank}, freq={freq:.2e})")
+    for py, expected, dtype in test_cases:
+        if dtype == 'char':
+            candidates = char_dict.get(py, [])
         else:
-            print(f"  ✗ {key} → 缺少 '{expected}', 现有: {words[:3]}")
-
-
-# ============ 主函数 ============
-
-def main():
-    print("=" * 60)
-    print("字典构建 v3 - 多源 NLP 数据自动融合")
-    print("=" * 60)
+            candidates = word_dict.get(py, [])
+        
+        if candidates:
+            rank = candidates.index(expected) + 1 if expected in candidates else -1
+            status = "✓" if rank == 1 else f"✗ (排名#{rank})"
+            print(f"  {py} → {expected}: {status}, Top3: {candidates[:3]}")
+        else:
+            print(f"  {py} → {expected}: ✗ 未找到")
     
-    # 1. 加载所有数据源
-    print("\n[1/6] 加载数据源...")
-    cedict_entries = load_cedict()
-    jieba_freq = load_jieba_freq()
-    
-    # 下载并加载扩展词频
-    print("\n[2/6] 加载扩展词频...")
-    download_external_freq()
-    
-    # jieba 大词典（58万词，最重要的补充）
-    jieba_big_freq = load_jieba_big_freq()
-    
-    # THUOCL 清华词库（领域词汇）
-    thuocl_freq = load_thuocl_freq()
-    print(f"  THUOCL 词条: {len(thuocl_freq):,}")
-    
-    # 生成结构化词组频率
-    print("\n[3/6] 生成结构化词组...")
-    generated_freq = generate_bigram_freq_from_corpus(jieba_freq)
-    
-    # 融合所有词频（jieba大词典优先级最高）
-    print("\n[4/6] 融合词频数据...")
-    merged_freq = merge_frequencies(jieba_freq, jieba_big_freq, thuocl_freq, generated_freq)
-    print(f"  融合后词条: {len(merged_freq):,}")
-    
-    # 应用词频修正（口语优先）
-    merged_freq = apply_frequency_corrections(merged_freq)
-    
-    # 构建字典
-    print("\n[5/6] 构建字典...")
-    char_dict = build_char_dict_from_cedict(cedict_entries)
-    word_dict = build_word_dict(merged_freq, char_dict, cedict_entries)
-    
-    # 构建频率表
-    char_freq = build_char_freq(char_dict, merged_freq)
-    word_freq = build_word_freq(word_dict, merged_freq)
-    
-    # 排序
-    print("\n[6/6] 排序优化...")
-    char_dict_sorted = sort_dict_by_freq({k: list(v) for k, v in char_dict.items()}, char_freq)
-    word_dict_sorted = sort_dict_by_freq(word_dict, word_freq)
-    pinyin_table = sorted(char_dict_sorted.keys())
-    
-    # 验证
-    verify_dict(word_dict_sorted, word_freq)
-    
-    # 保存
-    print("\n保存文件...")
-    save_json(char_dict_sorted, 'char_dict.json')
-    save_json(word_dict_sorted, 'word_dict.json')
-    save_json(char_freq, 'char_freq.json')
-    save_json(word_freq, 'word_freq.json')
-    save_txt(pinyin_table, 'pinyin_table.txt')
-    
-    # 统计
-    print("\n" + "=" * 60)
-    print("构建完成!")
-    print(f"  数据源: CC-CEDICT + jieba + THUOCL + 结构化生成")
-    print(f"  拼音数: {len(pinyin_table)}")
-    print(f"  单字数: {sum(len(v) for v in char_dict_sorted.values()):,}")
-    print(f"  词组数: {sum(len(v) for v in word_dict_sorted.values()):,}")
-    print("=" * 60)
+    print("=" * 50)
+    print(f"构建完成!")
+    print(f"  词组数: {len(word_dict):,}")
+    print(f"  单字拼音: {len(char_dict):,}")
+    print(f"  词频条目: {len(word_freq):,}")
+    print(f"  字频条目: {len(char_freq):,}")
 
 
 if __name__ == '__main__':
-    main()
+    build_dictionaries()

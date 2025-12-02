@@ -23,13 +23,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from slm.model import SLModel, SLMConfig, SLMVocab
 
 
-# ============ 轻量级配置 ============
+# ============ 模型配置 ============
+# 升级版：4层 256维，约 3M 参数，平衡性能与速度
 LITE_CONFIG = {
-    'd_model': 128,      # 从 256 减到 128
-    'n_heads': 4,        # 保持 4 头
-    'n_layers': 2,       # 从 4 层减到 2 层
-    'd_ff': 256,         # 从 1024 减到 256
-    'max_len': 64,       # 从 128 减到 64
+    'd_model': 256,      # 隐藏维度
+    'n_heads': 4,        # 注意力头数
+    'n_layers': 4,       # Transformer 层数
+    'd_ff': 512,         # FFN 维度
+    'max_len': 64,       # 最大序列长度
     'dropout': 0.1,
 }
 
@@ -132,12 +133,12 @@ def main():
     parser.add_argument('--data', type=str, default='data/train_data.jsonl')
     parser.add_argument('--freq', type=str, default='dicts/char_freq.json')
     parser.add_argument('--output', type=str, default='checkpoints/slm_lite')
-    parser.add_argument('--epochs', type=int, default=20)
-    parser.add_argument('--batch-size', type=int, default=128)
-    parser.add_argument('--lr', type=float, default=3e-4)
-    parser.add_argument('--max-samples', type=int, default=50000, help='最大样本数')
-    parser.add_argument('--vocab-size', type=int, default=5000, help='词表大小')
-    parser.add_argument('--val-split', type=float, default=0.1)
+    parser.add_argument('--epochs', type=int, default=15)
+    parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--lr', type=float, default=5e-4)
+    parser.add_argument('--max-samples', type=int, default=500000, help='最大样本数')
+    parser.add_argument('--vocab-size', type=int, default=8000, help='词表大小')
+    parser.add_argument('--val-split', type=float, default=0.05)
     parser.add_argument('--device', type=str, default='cuda')
     
     args = parser.parse_args()
