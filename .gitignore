@@ -47,6 +47,9 @@ zhwiki-latest-pages-articles.xml
 # CC-CEDICT source file (can be re-downloaded)
 preprocess/cedict.txt.gz
 
+# External frequency data (downloaded at build time)
+preprocess/external_freq/
+
 # OS files
 .DS_Store
 Thumbs.db

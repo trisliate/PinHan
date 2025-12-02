@@ -360,12 +360,15 @@ class CandidateReranker:
         
         # 综合分数
         if dict_scores:
-            # 归一化词频分数
-            min_p, max_p = min(dict_scores), max(dict_scores)
-            if max_p > min_p:
-                dict_norm = [(s - min_p) / (max_p - min_p) for s in dict_scores]
+            # 使用对数归一化，保留词频差距的数量级
+            # 例如：词频差10倍 → 对数差约 2.3
+            import math
+            log_scores = [math.log(max(s, 1e-10)) for s in dict_scores]
+            min_log, max_log = min(log_scores), max(log_scores)
+            if max_log > min_log:
+                dict_norm = [(s - min_log) / (max_log - min_log) for s in log_scores]
             else:
-                dict_norm = [0.5] * len(dict_scores)
+                dict_norm = [0.5] * len(log_scores)
             
             final_scores = [
                 alpha * p + (1 - alpha) * s

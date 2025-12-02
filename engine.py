@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 class EngineConfig:
     """引擎配置"""
     top_k: int = 10
-    use_slm: bool = True
+    use_slm: bool = False      # SLM 重排序（暂时禁用，等重新训练后启用）
+    use_fuzzy: bool = False     # 模糊音匹配（暂时禁用）
     cache_size: int = 2000
 
 
@@ -314,26 +315,34 @@ class IMEEngineV3:
         return corrected
     
     def _dict_lookup(self, segments: List[str], limit: int = None) -> List[CandidateResult]:
-        """词典查询 (含模糊音扩展)"""
+        """词典查询"""
         limit = limit or self.config.top_k * 3
         candidates = []
         seen = set()
         
-        # 生成拼音组合 (模糊音)
-        combos = self._expand_fuzzy(segments)
+        # 根据配置决定是否启用模糊音
+        if self.config.use_fuzzy:
+            combos = self._expand_fuzzy(segments)
+        else:
+            combos = [segments]  # 只用原始拼音
         
         for pinyins in combos:
             is_original = (pinyins == segments)
             
             # 词组匹配
             words = self.dict_service.get_words(pinyins)
-            for word in words[:20 if is_original else 5]:
+            for i, word in enumerate(words[:20 if is_original else 5]):
                 if word in seen:
                     continue
                 seen.add(word)
                 
                 freq = self.dict_service.get_word_freq(word)
-                score = min(freq + 0.5, 1.0) * (1.0 if is_original else 0.8)
+                # 直接使用词频作为分数，保留词频差异
+                # 加上排名惩罚，确保词典排序优先
+                rank_bonus = 1.0 / (i + 1) * 0.1  # 排名越靠前，额外加分
+                score = freq + rank_bonus
+                if not is_original:
+                    score *= 0.8  # 模糊音降权
                 
                 candidates.append(CandidateResult(
                     text=word,
@@ -372,7 +381,11 @@ class IMEEngineV3:
         return candidates[:limit]
     
     def _expand_fuzzy(self, segments: List[str]) -> List[List[str]]:
-        """模糊音扩展"""
+        """模糊音扩展 - 保守策略"""
+        # 短输入不做模糊音扩展（避免误扩展）
+        if len(segments) <= 2:
+            return [segments]
+        
         if len(segments) > 3:
             return [segments]
         
@@ -381,11 +394,12 @@ class IMEEngineV3:
         options_list = []
         for seg in segments:
             options = [seg]
-            corrs = self.corrector.correct(seg, top_k=5)
+            corrs = self.corrector.correct(seg, top_k=3)
             for c in corrs:
-                if c.pinyin != seg and c.score >= 0.85:
+                # 只接受高置信度的纠错（0.95以上）
+                if c.pinyin != seg and c.score >= 0.95:
                     options.append(c.pinyin)
-            options_list.append(options[:3])
+            options_list.append(options[:2])  # 最多2个选项
         
         combos = [segments]
         for combo in itertools.product(*options_list):
@@ -397,11 +411,26 @@ class IMEEngineV3:
     
     def _rerank(self, candidates: List[CandidateResult], context: str) -> List[CandidateResult]:
         """SLM 重排序"""
+        if not candidates:
+            return candidates
+        
         texts = [c.text for c in candidates]
         scores = [c.score for c in candidates]
         
-        # 动态 alpha: 有上下文时更依赖 SLM，无上下文时更依赖词频
-        alpha = 0.5 if context else 0.2
+        # 检查词频差距：如果首选词频远高于其他候选，减少 SLM 干预
+        max_score = max(scores) if scores else 0
+        second_score = sorted(scores, reverse=True)[1] if len(scores) > 1 else 0
+        
+        # alpha 是词典权重（越高越信任词典）
+        # SLM 权重 = 1 - alpha
+        if max_score > second_score * 10:
+            alpha = 0.95  # 几乎完全信任词典
+        elif max_score > second_score * 3:
+            alpha = 0.85  # 较信任词典
+        elif context:
+            alpha = 0.7   # 有上下文时适度依赖 SLM
+        else:
+            alpha = 0.8   # 无上下文时更依赖词频
         
         reranked = self.reranker.rerank(texts, scores, alpha=alpha, context=context[-10:])
         
