@@ -210,8 +210,7 @@ class IMEEngineV3:
         pinyin: str, 
         candidates: List[CandidateResult], 
         elapsed_ms: float,
-        segments: List[str] = None,
-        cached: bool = False
+        segments: List[str] = None
     ) -> EngineOutput:
         """构建输出"""
         return EngineOutput(
@@ -220,7 +219,6 @@ class IMEEngineV3:
             segmented_pinyin=segments or [],
             metadata={
                 'elapsed_ms': round(elapsed_ms, 2),
-                'cached': cached,
                 'cache_rate': round(self.cache.hit_rate, 3),
             }
         )

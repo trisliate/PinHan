@@ -8,7 +8,6 @@ import orjson
 import os
 import re
 from typing import Dict, List, Optional, Tuple
-from functools import lru_cache
 
 
 # 声调字符映射表（字符音标 → 数字音标）

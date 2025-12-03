@@ -270,34 +270,3 @@ VALID_FINALS = {
     'va', 've', 'van', 'vn'
 }
 
-
-if __name__ == '__main__':
-    # 测试
-    import os
-    
-    dict_path = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
-        'dicts', 'char_dict.json'
-    )
-    
-    if os.path.exists(dict_path):
-        corrector = create_corrector_from_dict(dict_path)
-        
-        test_cases = [
-            'ni',      # 正确
-            'nii',     # 多打一个i
-            'zhonh',   # zhong 打错
-            'zhongguo',  # 正确
-            'zon',     # 模糊音 zong
-            'xang',    # 模糊音 xiang
-            'lv',      # 正确
-        ]
-        
-        print("拼音纠错测试：")
-        for py in test_cases:
-            results = corrector.correct(py, top_k=3)
-            print(f"\n  {py}:")
-            for r in results:
-                print(f"    -> {r.pinyin} (score={r.score:.2f}, {r.reason})")
-    else:
-        print(f"词典不存在: {dict_path}")

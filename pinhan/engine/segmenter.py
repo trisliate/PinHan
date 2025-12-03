@@ -237,24 +237,3 @@ def create_segmenter_from_dict(dict_path: str = None) -> PinyinSegmenter:
     
     return PinyinSegmenter(pinyin_freq)
 
-
-if __name__ == '__main__':
-    # 测试
-    segmenter = PinyinSegmenter()
-    
-    test_cases = [
-        'nihao',
-        'nihaoma',
-        'zhongguoren',
-        'xian',       # 西安 vs 先
-        'fangan',     # 方案 vs 翻干
-        'xianzai',
-        'womenshizuihaodepengyou',
-    ]
-    
-    print("拼音切分测试：")
-    for text in test_cases:
-        results = segmenter.segment(text, top_k=3)
-        print(f"\n  {text}:")
-        for i, r in enumerate(results):
-            print(f"    {i+1}. {r} (score={r.score:.4f})")

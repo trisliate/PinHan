@@ -9,11 +9,9 @@ import sys
 import logging
 import orjson
 from datetime import datetime
-from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 from pathlib import Path
-from functools import wraps
-import time
 
 
 # 项目根目录
@@ -164,62 +162,7 @@ def get_logger(name: str = 'pinhan') -> logging.Logger:
     return logger
 
 
-class LogContext:
-    """日志上下文管理器，用于添加额外信息"""
-    
-    def __init__(self, logger: logging.Logger, **kwargs):
-        self.logger = logger
-        self.extra = kwargs
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
-    
-    def info(self, msg, **kwargs):
-        self._log(logging.INFO, msg, **kwargs)
-    
-    def debug(self, msg, **kwargs):
-        self._log(logging.DEBUG, msg, **kwargs)
-    
-    def warning(self, msg, **kwargs):
-        self._log(logging.WARNING, msg, **kwargs)
-    
-    def error(self, msg, **kwargs):
-        self._log(logging.ERROR, msg, **kwargs)
-    
-    def _log(self, level, msg, **kwargs):
-        extra = {**self.extra, **kwargs}
-        record = self.logger.makeRecord(
-            self.logger.name, level, '', 0, msg, (), None
-        )
-        for k, v in extra.items():
-            setattr(record, k, v)
-        self.logger.handle(record)
 
-
-def log_execution_time(logger: Optional[logging.Logger] = None):
-    """装饰器：记录函数执行时间"""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            nonlocal logger
-            if logger is None:
-                logger = get_logger()
-            
-            start = time.perf_counter()
-            try:
-                result = func(*args, **kwargs)
-                elapsed = (time.perf_counter() - start) * 1000
-                logger.debug(f"{func.__name__} 执行完成, 耗时: {elapsed:.2f}ms")
-                return result
-            except Exception as e:
-                elapsed = (time.perf_counter() - start) * 1000
-                logger.error(f"{func.__name__} 执行失败, 耗时: {elapsed:.2f}ms, 错误: {e}")
-                raise
-        return wrapper
-    return decorator
 
 
 # 预配置的日志器
