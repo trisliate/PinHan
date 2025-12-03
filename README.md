@@ -81,41 +81,53 @@ PinHan v3 放弃了复杂的序列级模型（SLM），采用**纯词典 + 规�
 ## 📦 项目结构
 
 ```
-pinhan/                          # Python 包
-├── engine/                       # 核心引擎模块
-│   ├── core.py                  # IME 主引擎 (纯词典版)
-│   ├── dictionary.py            # 词典查询服务
-│   ├── corrector.py             # 拼音纠错器 (模糊音/编辑距离)
-│   ├── segmenter.py             # 拼音切分器 (动态规划)
-│   ├── generator.py             # 候选生成器 (Beam Search)
-│   ├── cache.py                 # LRU 缓存
-│   ├── config.py                # 配置类
-│   ├── logging.py               # 结构化日志
+PinHan/
+├── data/                          # 🔑 所有数据处理和存储
+│   ├── dicts/                     # ✅ 编译后的词典（JSON格式）
+│   │   ├── char_dict.json         # 拼音→字 映射
+│   │   ├── word_dict.json         # 拼音→词 映射
+│   │   ├── char_freq.json         # 字→频率
+│   │   ├── word_freq.json         # 词→频率
+│   │   └── pinyin_table.txt       # 合法拼音表
+│   ├── extensions/                # 自定义热词/扩展词库
+│   │   ├── README.md
+│   │   └── hotwords.txt           # 示例：品牌词、热词等
+│   └── sources/                   # 第三方词库源
+│       ├── SUBTLEX-CH/            # 电影字幕词表（内置）
+│       ├── cedict.txt.gz          # CC-CEDICT拼音字典
+│       └── （其他第三方词库）
+│
+├── scripts/
+│   └── build_dict.py              # 词库构建脚本（融合多源→data/dicts/）
+│
+├── pinhan/                         # Python 包
+│   ├── engine/                    # 核心引擎模块
+│   │   ├── core.py                # IME 主引擎
+│   │   ├── dictionary.py          # 词典查询服务
+│   │   ├── corrector.py           # 拼音纠错器
+│   │   ├── segmenter.py           # 拼音切分器
+│   │   ├── generator.py           # 候选生成器
+│   │   ├── cache.py               # LRU 缓存
+│   │   ├── config.py              # 配置类
+│   │   ├── logging.py             # 日志
+│   │   └── __init__.py
+│   ├── api/                       # FastAPI 服务
+│   │   ├── server.py
+│   │   └── __init__.py
+│   ├── cli.py                     # 命令行工具
 │   └── __init__.py
-├── api/                          # FastAPI 服务
-│   ├── server.py                # API 服务入口
-│   └── __init__.py
-├── cli.py                        # 命令行接口
-├── __init__.py                  # 包导出
-└── data/dicts/                  # 编译后的词典 (JSON)
-    ├── char_dict.json           # 拼音→字 映射
-    ├── word_dict.json           # 拼音→词 映射
-    ├── char_freq.json           # 字→频率
-    ├── word_freq.json           # 词→频率
-    └── pinyin_table.txt         # 合法拼音表
-
-scripts/
-└── build_dict.py               # 词库构建脚本 (融合多源)
-
-data/
-├── dicts/                       # 编译词典存储
-├── extensions/                  # 🔑 自定义热词/扩展词表
-│   ├── README.md                # 说明文档
-│   └── hotwords.txt             # 示例热词表
-└── sources/                     # 第三方词库源
-    ├── SUBTLEX-CH/              # 电影字幕词表
-    └── （其他第三方词库）
+│
+├── pyproject.toml                 # Python 包配置
+├── Dockerfile                     # Docker 构建
+├── README.md
+└── .gitignore
 ```
+
+**关键点**：
+- 👉 词典数据存储在**根目录 `data/dicts/`** （不在包内）
+- 📝 扩展词库在 **`data/extensions/`**（自动扫描）
+- 🔄 构建脚本自动输出到 `data/dicts/`
+- 📦 PyPI 安装时自动包含 `data/dicts/` 中的词典
 
 ---
 
@@ -292,7 +304,7 @@ curl http://localhost:3000/stats
 
 ### 添加热词
 
-编辑 `data/extensions/hotwords.txt`，格式为 `词语<空格>频率`：
+编辑 **`data/extensions/hotwords.txt`**（在项目根目录，不是包内），格式为 `词语<空格>频率`：
 
 ```text
 你好 100
@@ -308,14 +320,70 @@ curl http://localhost:3000/stats
 python scripts/build_dict.py
 ```
 
+词典会自动更新到 `data/dicts/` 并即时生效。
+
 ### 集成第三方词库
 
-1. 获取词库源文件（如 THUOCL、jieba）
-2. 转换为标准格式：`词语<空格>频率`
-3. 放入 `data/sources/` 目录
-4. 运行 `python scripts/build_dict.py` 自动融合
+**步骤**：
 
----
+1. **获取词库源文件**（如 THUOCL、jieba、SogouDict）
+2. **转换为标准格式**：`词语<空格>频率`（一行一条）
+3. **放入** `data/sources/` 目录（任意子目录）
+4. **运行** `python scripts/build_dict.py` 自动融合
+
+**示例**：
+
+```bash
+# 添加 jieba 词库
+mkdir -p data/sources/jieba
+cp jieba_dict.txt data/sources/jieba/
+
+# 添加 THUOCL 词库
+mkdir -p data/sources/thuocl
+cp thuocl_*.txt data/sources/thuocl/
+
+# 重建词典（自动扫描所有源）
+python scripts/build_dict.py
+
+# 输出日志：
+# ✓ 加载 SUBTLEX-CH: 10000 条词
+# ✓ 加载 extensions/: 100 条词  
+# ✓ 加载 sources/: 15000 条词
+# ✓ 融合优先级...
+# ✓ 生成 JSON 词典...
+# ✓ 完成！词典已保存: data/dicts/
+```
+
+### 推荐的第三方词库
+
+| 词库 | 来源 | 链接 | 特点 |
+|------|------|------|------|
+| **SUBTLEX-CH** | 电影/电视字幕 | http://subtlex.org/ | 口语频率最真实（已内置）|
+| **THUOCL** | 清华大学 | https://github.com/thunlp/THUOCL | 30个专业领域 |
+| **jieba** | 自然语言处理 | https://github.com/fxsjy/jieba | 通用高频词 |
+| **pkuseg** | 北京大学 | https://github.com/lancopku/pkuseg-python | 跨领域分词 |
+| **SogouDict** | 搜狗 | https://pinyin.sogou.com/dict | 互联网热词 |
+
+### 词库优先级说明
+
+融合时采用**权重覆盖**策略（高优先级覆盖低优先级）：
+
+```
+权重 50: 你好:999   (SUBTLEX-CH) ✓ 采用
+权重 40: 你好:888   (extensions) ← 被上层覆盖
+权重 30: 你好:500   (sources)    ← 被上层覆盖
+权重 10: 你好:100   (CEDICT)     ← 被上层覆盖
+
+最终结果: 你好:999 (来自 SUBTLEX-CH)
+```
+
+通过提高 `data/extensions/` 中的频率可以优先选择热词：
+
+```text
+# data/extensions/hotwords.txt
+新产品 200     # 权重40，可能会覆盖源中较低的词频
+明星名字 180
+```
 
 ## ⚙️ 配置说明
 

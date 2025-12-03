@@ -36,14 +36,15 @@ dist/
 pip-wheel-metadata/
 
 # === Data (Large Files) ===
-# 大型数据源 - 需要手动下载
-data/sources/
+# 大型数据源 - 需要手动下载或构建
+data/sources/SUBTLEX-CH/
+data/sources/*.txt.gz
 data/*/*.jsonl
 zhwiki-latest-pages-articles.xml
 
-# === 保留扩展词库和包内词典 ===
+# === 保留编译词典和扩展词库 ===
+!data/dicts/
 !data/extensions/
-!pinhan/data/dicts/
 
 # === Logs ===
 logs/

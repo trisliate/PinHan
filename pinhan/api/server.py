@@ -63,12 +63,9 @@ async def lifespan(app: FastAPI):
     logger.info("PinHan API 服务启动")
     logger.info("正在初始化 IME 引擎...")
     
-    # 使用包内数据目录
-    import pinhan
-    package_dir = os.path.dirname(pinhan.__file__)
-    
+    # 词典目录：自动查找项目根目录下的 data/dicts
     config = EngineConfig(top_k=20)
-    engine = create_engine_v3(config, model_dir=package_dir)
+    engine = create_engine_v3(config)  # 自动查找 data/dicts
     
     logger.info("IME 引擎初始化完成")
     logger.info(f"  词典服务: {'✓' if engine.dict_service else '✗'}")

@@ -1,15 +1,30 @@
 """
 字典构建脚本 v5 - 可扩展词频融合架构
 
+功能：从多个词库源融合构建拼音词典
+
 数据源 (按优先级):
 1. SUBTLEX-CH - 电影字幕词频 (口语核心) - 优先级 50
+   位置: data/sources/SUBTLEX-CH/SUBTLEX-CH-WF
 2. extensions/*.txt - 扩展词库 (网络热词、专有名词等) - 优先级 40
+   位置: data/extensions/
 3. sources/*.txt - 第三方词库 (jieba、pkuseg、THUOCL 等) - 优先级 30
+   位置: data/sources/
 4. CC-CEDICT - 拼音映射 (兜底) - 优先级 10
+   位置: data/sources/cedict.txt.gz
 
-扩展方法:
-- 在 data/extensions/ 下添加 .txt 文件 (格式: 词语 频率) - 支持热词、品牌、专用术语等
-- 在 data/sources/ 下添加 .txt 文件 (格式: 词语 频率) - 支持第三方词库
+输出:
+- data/dicts/char_dict.json - 拼音→字 映射
+- data/dicts/word_dict.json - 拼音→词 映射
+- data/dicts/char_freq.json - 字→频率
+- data/dicts/word_freq.json - 词→频率
+- data/dicts/pinyin_table.txt - 合法拼音列表
+
+使用方法:
+1. 添加热词: 在 data/extensions/hotwords.txt 中添加 "词语 频率"
+2. 添加第三方词库: 将转换后的词库放在 data/sources/ 中
+3. 运行构建: python scripts/build_dict.py
+4. 结果自动更新到 data/dicts/ 和包内副本
 """
 
 import gzip
@@ -116,7 +131,7 @@ class SubtlexSource(FreqSource):
 
 
 class TextFileSource(FreqSource):
-    """通用文本文件词频源"""
+    """通用文本文件词频源 - 智能检测格式"""
     
     def __init__(self, path: Path, source_name: str, source_priority: int):
         self.path = path
@@ -131,6 +146,73 @@ class TextFileSource(FreqSource):
     def priority(self) -> int:
         return self._priority
     
+    def _load_jieba_format(self, f) -> Dict[str, float]:
+        """jieba 格式: 词 频率 [词性]"""
+        freq_map = {}
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                word = parts[0]
+                try:
+                    freq = float(parts[1])
+                    if is_chinese(word):
+                        freq_map[word] = freq
+                except ValueError:
+                    pass
+        return freq_map
+    
+    def _load_thuocl_format(self, f) -> Dict[str, float]:
+        """THUOCL 格式: 词\t频率 (制表符分隔)"""
+        freq_map = {}
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            # 尝试制表符分隔
+            if '\t' in line:
+                parts = line.split('\t')
+                if len(parts) >= 2:
+                    word = parts[0].strip()
+                    try:
+                        freq = float(parts[1])
+                        if is_chinese(word):
+                            freq_map[word] = freq
+                    except ValueError:
+                        pass
+            else:
+                # 备选：空格分隔
+                parts = line.split()
+                if len(parts) >= 2:
+                    word = parts[0]
+                    try:
+                        freq = float(parts[1])
+                        if is_chinese(word):
+                            freq_map[word] = freq
+                    except ValueError:
+                        pass
+        return freq_map
+    
+    def _load_sogou_format(self, f) -> Dict[str, float]:
+        """搜狗格式: 词 频率 词性 [更多字段]"""
+        freq_map = {}
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                word = parts[0]
+                try:
+                    freq = float(parts[1])
+                    if is_chinese(word):
+                        freq_map[word] = freq
+                except ValueError:
+                    pass
+        return freq_map
+    
     def load(self) -> Dict[str, float]:
         print(f"  加载 {self.name}: {self.path.name}")
         freq_map = {}
@@ -138,23 +220,27 @@ class TextFileSource(FreqSource):
         if not self.path.exists():
             return freq_map
         
+        # 根据文件名和目录推断格式
+        source_type = 'generic'
+        if 'jieba' in str(self.path):
+            source_type = 'jieba'
+        elif 'THUOCL' in str(self.path):
+            source_type = 'thuocl'
+        elif 'sogou' in str(self.path):
+            source_type = 'sogou'
+        
         # 尝试多种编码
         for encoding in ['utf-8', 'gb2312', 'gbk']:
             try:
                 with open(self.path, 'r', encoding=encoding) as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line or line.startswith('#'):
-                            continue
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            word = parts[0]
-                            try:
-                                freq = float(parts[1])
-                                if is_chinese(word):
-                                    freq_map[word] = freq
-                            except ValueError:
-                                pass
+                    if source_type == 'jieba':
+                        freq_map = self._load_jieba_format(f)
+                    elif source_type == 'thuocl':
+                        freq_map = self._load_thuocl_format(f)
+                    elif source_type == 'sogou':
+                        freq_map = self._load_sogou_format(f)
+                    else:
+                        freq_map = self._load_jieba_format(f)  # 默认用 jieba 格式
                 break
             except UnicodeDecodeError:
                 continue
@@ -250,10 +336,16 @@ def discover_sources() -> List[FreqSource]:
         for path in EXTENSIONS_DIR.glob('*.txt'):
             sources.append(TextFileSource(path, f"扩展/{path.stem}", 40))
     
-    # 3. 第三方词库 (sources/*.txt) - 优先级 30
+    # 3. 第三方词库 (sources/*.txt 及其子目录) - 优先级 30
     if SOURCES_DIR.exists():
-        for path in SOURCES_DIR.glob('*.txt'):
-            sources.append(TextFileSource(path, f"词库/{path.stem}", 30))
+        # 搜索 sources 下所有 .txt 文件，包括子目录
+        for path in SOURCES_DIR.rglob('*.txt'):
+            # 跳过 SUBTLEX-CH 和 cedict
+            if path.parent.name == 'SUBTLEX-CH' or path.name == 'cedict.txt.gz':
+                continue
+            # 使用相对路径作为源标识
+            rel_path = path.relative_to(SOURCES_DIR)
+            sources.append(TextFileSource(path, f"词库/{rel_path}", 30))
     
     return sources
 

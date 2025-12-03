@@ -5,9 +5,18 @@ from .corrector import PinyinCorrector, CorrectionCandidate, create_corrector_fr
 from .segmenter import PinyinSegmenter, SegmentResult, create_segmenter_from_dict
 from .logging import setup_logging, get_logger, get_api_logger, get_engine_logger
 
-def create_engine_v3(config: EngineConfig = None, model_dir: str = None) -> IMEEngineV3:
-    """创建 v3 引擎"""
-    return IMEEngineV3(config, model_dir)
+def create_engine_v3(config: EngineConfig = None, dicts_dir: str = None) -> IMEEngineV3:
+    """
+    创建 v3 引擎
+    
+    Args:
+        config: 引擎配置
+        dicts_dir: 词典目录路径（可选，默认使用项目根目录下的 data/dicts）
+    
+    Returns:
+        IMEEngineV3 实例
+    """
+    return IMEEngineV3(config, dicts_dir)
 
 __all__ = [
     # 引擎

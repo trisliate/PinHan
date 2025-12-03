@@ -24,9 +24,17 @@ class IMEEngineV3:
     # 标点符号集合（中英文）
     PUNCTUATION = set("，。！？、；：""''（）……——·,.:;!?\"'()-_+=[]{}|\\<>/@#$%^&*~`")
     
-    def __init__(self, config: EngineConfig = None, model_dir: str = None):
+    def __init__(self, config: EngineConfig = None, dicts_dir: str = None):
         self.config = config or EngineConfig()
-        self.model_dir = model_dir or os.path.dirname(os.path.dirname(__file__)) # engine/..
+        
+        # 字典目录：可指定、或使用项目根目录下的 data/dicts
+        if dicts_dir is None:
+            # 查找项目根目录（从 pinhan 包向上查找）
+            pkg_dir = os.path.dirname(os.path.dirname(__file__))  # pinhan/
+            root_dir = os.path.dirname(pkg_dir)                   # 项目根
+            dicts_dir = os.path.join(root_dir, 'data', 'dicts')
+        
+        self.dicts_dir = dicts_dir
         
         # 缓存
         self.cache = LRUCache(self.config.cache_size)
@@ -45,7 +53,7 @@ class IMEEngineV3:
     def _init_modules(self):
         """初始化模块"""
         # 字典数据位于 data/dicts
-        dicts_dir = os.path.join(self.model_dir, 'data', 'dicts')
+        dicts_dir = self.dicts_dir
         char_dict_path = os.path.join(dicts_dir, 'char_dict.json')
         
         self.dict_service = DictionaryService(dicts_dir)

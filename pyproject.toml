@@ -53,10 +53,17 @@ pinhan-server = "pinhan.api.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["pinhan"]
+# 包含词典数据文件
+include = [
+    "data/dicts/*.json",
+    "data/dicts/*.txt",
+]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "pinhan/",
+    "data/dicts/",
+    "scripts/",
     "README.md",
     "LICENSE",
 ]
