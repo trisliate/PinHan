@@ -5,8 +5,7 @@ from typing import List, Dict
 class EngineConfig:
     """引擎配置"""
     top_k: int = 10
-    use_slm: bool = True       # SLM 重排序（已启用）
-    use_fuzzy: bool = False     # 模糊音匹配（暂时禁用）
+    use_fuzzy: bool = True     # 模糊音匹配（已启用）
     cache_size: int = 2000
 
 

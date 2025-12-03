@@ -1,11 +1,10 @@
 """
-IME-SLM FastAPI 服务
+PinHan FastAPI 服务
 
 提供 RESTful API 接口
 """
 
 import os
-import sys
 import time
 import uuid
 from typing import List, Optional
@@ -15,10 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-# 添加项目根目录
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-from engine import IMEEngineV3, create_engine_v3, EngineConfig, get_api_logger
+from pinhan.engine import IMEEngineV3, create_engine_v3, EngineConfig, get_api_logger
 
 # 初始化日志
 logger = get_api_logger()
@@ -64,31 +60,32 @@ async def lifespan(app: FastAPI):
     global engine
     
     logger.info("=" * 50)
-    logger.info("IME-SLM API 服务启动")
+    logger.info("PinHan API 服务启动")
     logger.info("正在初始化 IME 引擎...")
     
-    project_root = os.path.dirname(os.path.dirname(__file__))
+    # 使用包内数据目录
+    import pinhan
+    package_dir = os.path.dirname(pinhan.__file__)
     
     config = EngineConfig(top_k=20)
-    engine = create_engine_v3(config, model_dir=project_root)
+    engine = create_engine_v3(config, model_dir=package_dir)
     
     logger.info("IME 引擎初始化完成")
     logger.info(f"  词典服务: {'✓' if engine.dict_service else '✗'}")
-    logger.info(f"  SLM 模型: {'✓' if engine.slm_model else '✗'}")
     logger.info("=" * 50)
     
     yield
     
     logger.info("正在关闭 IME 引擎...")
     engine = None
-    logger.info("IME-SLM API 服务已停止")
+    logger.info("PinHan API 服务已停止")
 
 
 # ===== FastAPI 应用 =====
 app = FastAPI(
-    title="IME-SLM API",
-    description="拼音输入法引擎 API",
-    version="0.2.0",
+    title="PinHan API",
+    description="轻量级智能拼音输入法引擎 API",
+    version="0.1.0",
     lifespan=lifespan,
 )
 
@@ -146,9 +143,10 @@ async def log_requests(request: Request, call_next):
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """健康检查"""
+    from pinhan import __version__
     return HealthResponse(
         status="healthy" if engine else "not_ready",
-        version="0.2.0",
+        version=__version__,
     )
 
 
@@ -234,15 +232,15 @@ def main():
     import uvicorn
     
     host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "3000"))
     log_level = os.getenv("LOG_LEVEL", "info").lower()
     
-    logger.info(f"启动 IME-SLM API 服务: http://{host}:{port}")
+    logger.info(f"启动 PinHan API 服务: http://{host}:{port}")
     logger.info(f"API 文档: http://{host}:{port}/docs")
     logger.info(f"日志级别: {log_level.upper()}")
     
     uvicorn.run(
-        "api.server:app", 
+        "pinhan.api.server:app", 
         host=host, 
         port=port, 
         reload=False, 

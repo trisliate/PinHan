@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pinhan"
+version = "0.1.0"
+description = "轻量级智能拼音输入法引擎，纯词典版，专为嵌入式/MCU 设备优化"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "trisliate" }
+]
+keywords = ["pinyin", "ime", "chinese", "input-method", "dictionary"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Text Processing :: Linguistic",
+]
+
+dependencies = [
+    "orjson>=3.10.0",
+    "pypinyin>=0.53.0",
+    "jieba>=0.42.1",
+    "opencc-python-reimplemented>=0.1.7",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "black>=24.0.0",
+    "ruff>=0.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/trisliate/PinHan"
+Repository = "https://github.com/trisliate/PinHan"
+Issues = "https://github.com/trisliate/PinHan/issues"
+
+[project.scripts]
+pinhan = "pinhan.cli:main"
+pinhan-server = "pinhan.api.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pinhan"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "pinhan/",
+    "README.md",
+    "LICENSE",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
