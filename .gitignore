@@ -38,17 +38,12 @@ pip-wheel-metadata/
 # === Data (Large Files) ===
 # 大型数据源 - 需要手动下载
 data/sources/
-data/dicts/
 data/*/*.jsonl
 zhwiki-latest-pages-articles.xml
 
-# === Model model ===
-# 模型权重文件过大，需要单独下载
-model/
-*.pt
-*.pth
-*.ckpt
-*.bin
+# === 保留扩展词库和包内词典 ===
+!data/extensions/
+!pinhan/data/dicts/
 
 # === Logs ===
 logs/

@@ -1,15 +1,15 @@
 """
-字典构建脚本 v4 - 可扩展词频融合架构
+字典构建脚本 v5 - 可扩展词频融合架构
 
 数据源 (按优先级):
-1. 用户自定义词频 (patches/*.txt) - 最高优先级，用于修正
-2. SUBTLEX-CH - 电影字幕词频 (口语核心)
-3. 扩展词库 (sources/*.txt) - 补充覆盖
-4. CC-CEDICT - 拼音映射 (兜底)
+1. SUBTLEX-CH - 电影字幕词频 (口语核心) - 优先级 50
+2. extensions/*.txt - 扩展词库 (网络热词、专有名词等) - 优先级 40
+3. sources/*.txt - 第三方词库 (jieba、pkuseg、THUOCL 等) - 优先级 30
+4. CC-CEDICT - 拼音映射 (兜底) - 优先级 10
 
 扩展方法:
-- 在 data/patches/ 下添加 .txt 文件 (格式: 词语 频率)
-- 在 data/sources/ 下添加 .txt 文件 (格式: 词语 频率)
+- 在 data/extensions/ 下添加 .txt 文件 (格式: 词语 频率) - 支持热词、品牌、专用术语等
+- 在 data/sources/ 下添加 .txt 文件 (格式: 词语 频率) - 支持第三方词库
 """
 
 import gzip
@@ -30,8 +30,8 @@ OUTPUT_DIR = DATA_DIR / 'dicts'
 
 CEDICT_PATH = DATA_DIR / 'sources' / 'cedict.txt.gz'
 SUBTLEX_PATH = DATA_DIR / 'sources' / 'SUBTLEX-CH' / 'SUBTLEX-CH-WF'
-PATCHES_DIR = DATA_DIR / 'patches'   # 高优先级修正
-SOURCES_DIR = DATA_DIR / 'sources'   # 扩展词库
+EXTENSIONS_DIR = DATA_DIR / 'extensions'   # 扩展词库
+SOURCES_DIR = DATA_DIR / 'sources'   # 第三方词库
 
 
 # ============ 工具函数 ============
@@ -242,18 +242,18 @@ def discover_sources() -> List[FreqSource]:
     """自动发现所有数据源"""
     sources = []
     
-    # 1. SUBTLEX-CH (核心)
+    # 1. SUBTLEX-CH (口语核心) - 优先级 50
     sources.append(SubtlexSource())
     
-    # 2. 扩展词库 (sources/*.txt) - 优先级 30
+    # 2. 扩展词库 (extensions/*.txt) - 优先级 40
+    if EXTENSIONS_DIR.exists():
+        for path in EXTENSIONS_DIR.glob('*.txt'):
+            sources.append(TextFileSource(path, f"扩展/{path.stem}", 40))
+    
+    # 3. 第三方词库 (sources/*.txt) - 优先级 30
     if SOURCES_DIR.exists():
         for path in SOURCES_DIR.glob('*.txt'):
-            sources.append(TextFileSource(path, f"扩展/{path.stem}", 30))
-    
-    # 3. 补丁词库 (patches/*.txt) - 优先级 100 (最高)
-    if PATCHES_DIR.exists():
-        for path in PATCHES_DIR.glob('*.txt'):
-            sources.append(TextFileSource(path, f"补丁/{path.stem}", 100))
+            sources.append(TextFileSource(path, f"词库/{path.stem}", 30))
     
     return sources
 

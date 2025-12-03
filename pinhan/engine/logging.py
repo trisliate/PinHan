@@ -225,7 +225,6 @@ def log_execution_time(logger: Optional[logging.Logger] = None):
 # 预配置的日志器
 api_logger = None
 engine_logger = None
-train_logger = None
 
 
 def get_api_logger() -> logging.Logger:
@@ -242,11 +241,3 @@ def get_engine_logger() -> logging.Logger:
     if engine_logger is None:
         engine_logger = setup_logging('pinhan.engine', level='INFO')
     return engine_logger
-
-
-def get_train_logger() -> logging.Logger:
-    """获取训练日志器"""
-    global train_logger
-    if train_logger is None:
-        train_logger = setup_logging('pinhan.train', level='DEBUG')
-    return train_logger
